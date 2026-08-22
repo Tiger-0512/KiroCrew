@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from kiro_crew.acp.types import STOP_REASON_CANCELLED, STOP_REASON_END_TURN, TurnUsage
 from kiro_crew.monitoring.models import (
@@ -24,13 +24,14 @@ def disposition_for_stop_reason(stop_reason: str) -> MonitorActionDisposition:
     return MonitorActionDisposition.FAILURE
 
 
-@dataclass(frozen=True)
+@dataclass
 class MonitorCompletionHook:
     """Bind a surface's raw turn result to one monitor action identity."""
 
     monitor_id: str
     fingerprint: str
     callback: MonitorCompletionCallback
+    _accepted: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         for name in ("monitor_id", "fingerprint"):
@@ -59,6 +60,15 @@ class MonitorCompletionHook:
                 output_tokens=output_tokens,
             )
         )
+
+    @property
+    def accepted(self) -> bool:
+        """Whether a surface attached this correlation to a starting turn."""
+        return self._accepted
+
+    def mark_accepted(self) -> None:
+        """Record the boundary after which completion evidence owns recovery."""
+        self._accepted = True
 
 
 def _authoritative_token_counts(usage: TurnUsage | None) -> tuple[int | None, int | None]:

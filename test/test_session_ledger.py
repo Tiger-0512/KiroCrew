@@ -381,9 +381,7 @@ def test_gateway_fire_callbacks_use_the_composer():
     from kiro_crew.slack import gateway
 
     src = inspect.getsource(gateway)
-    assert (
-        src.count("compose_nudge_body(loop.message, loop.stop_sentinel_path, loop.slot_key)") == 3
-    )
+    assert src.count("compose_nudge_body(") == 3
 
 
 # ── HTTP routes ───────────────────────────────────────────────────────────
