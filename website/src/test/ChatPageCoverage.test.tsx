@@ -41,6 +41,8 @@ import { ApiError } from '../api/client'
 import { ThemeProvider } from '../hooks/useTheme'
 import type { RootState } from '../store'
 import type { ChatMessage } from '../types'
+import { structuredMonitorLoop } from './monitorFixtures'
+import { normalizeAutomationRecord } from '../monitoring/automation'
 
 // --- Prop recorders for the two panels whose callbacks are under test --------
 
@@ -71,6 +73,8 @@ let userMsgProps: UserMessageProps | null = null
 
 interface ChatInputProps {
   onAgentClick?: (rect: DOMRect) => void
+  automation?: { kind?: string } | null
+  automationCreationReady?: boolean
 }
 let chatInputProps: ChatInputProps | null = null
 
@@ -356,6 +360,51 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers()
+})
+
+describe('ChatPage active-slot automation hydration', () => {
+  it('blocks creation until REST discovers a monitor without a websocket frame', async () => {
+    let resolveLegacy!: (value: { enabled: boolean; loop: unknown }) => void
+    let resolveMonitor!: (value: { enabled: boolean; monitor: unknown }) => void
+    apiMocks.autonudgeForSlot = vi.fn().mockReturnValue(new Promise(resolve => {
+      resolveLegacy = resolve
+    }))
+    apiMocks.monitorForSlot = vi.fn().mockReturnValue(new Promise(resolve => {
+      resolveMonitor = resolve
+    }))
+
+    renderChatPage([])
+    await waitFor(() => expect(chatInputProps?.automationCreationReady).toBe(false))
+    expect(apiMocks.autonudgeForSlot).toHaveBeenCalledWith('chat-1')
+    expect(apiMocks.monitorForSlot).toHaveBeenCalledWith('chat-1')
+
+    const loop = structuredMonitorLoop()
+    act(() => {
+      resolveLegacy({ enabled: true, loop })
+      resolveMonitor({ enabled: true, monitor: loop })
+    })
+    await waitFor(() => {
+      expect(chatInputProps?.automation).toMatchObject({ kind: 'structured_monitor' })
+      expect(chatInputProps?.automationCreationReady).toBe(true)
+    })
+  })
+
+  it('reconciles a disconnected REST snapshot into the shared automation store', async () => {
+    const stale = normalizeAutomationRecord(structuredMonitorLoop())!
+    const freshLoop = structuredMonitorLoop({ active: false, stopped_reason: 'user_stop' })
+    const fresh = normalizeAutomationRecord(freshLoop)!
+    apiMocks.autonudgeForSlot = vi.fn().mockResolvedValue({ enabled: true, loop: null })
+    apiMocks.monitorForSlot = vi.fn().mockResolvedValue({ enabled: true, monitor: freshLoop })
+
+    const { store } = renderChatPage([], {
+      chat: { automations: { 'chat-1': stale } },
+    })
+
+    await waitFor(() => {
+      expect(store.getState().chat.automations['chat-1']).toEqual(fresh)
+      expect(chatInputProps?.automation).toEqual(fresh)
+    })
+  })
 })
 
 describe('ChatPage agent-switch failure feedback', () => {
