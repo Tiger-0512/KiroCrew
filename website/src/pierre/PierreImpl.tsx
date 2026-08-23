@@ -11,6 +11,7 @@ import { EXTENSION_TO_FILE_FORMAT, parsePatchFiles, setCustomExtension } from '@
 import { File, FileDiff, MultiFileDiff, Virtualizer, WorkerPoolContext } from '@pierre/diffs/react'
 import { getOrCreateWorkerPoolSingleton } from '@pierre/diffs/worker'
 import { useIsDark } from '../hooks/useIsDark'
+import { recordCacheKey, startPierrePerfReporting } from '../lib/pierrePerf'
 import { PlainCodeFallback } from './PlainCodeFallback'
 import {
   PIERRE_EXTENSION_OVERRIDES,
@@ -64,11 +65,25 @@ export function fenceLanguage(tag?: string): SupportedLanguages {
  *  NAME and caches highlight results by it, so two renders of the same file
  *  name with different text (a streaming patch, a live-edited buffer) would
  *  serve the first render's cached tokens forever. Keying on content keeps the
- *  cache correct while still deduping identical re-renders. */
-export function contentCacheKey(name: string, contents: string): string {
+ *  cache correct while still deduping identical re-renders.
+ *
+ *  `surface` names the rendered surface for the churn accounting ONLY — it never
+ *  enters the returned key, so cache identity is unchanged. It exists because a
+ *  filename is not a tokenization unit: a diff's old side and new side share one
+ *  name yet legitimately tokenize once EACH, so attributing churn per name reads
+ *  every static diff as 2 (a false confirm), while attributing per surface keeps
+ *  a settled diff at 1 per side and only a streamed surface climbs. */
+export function contentCacheKey(name: string, contents: string, surface = 'file'): string {
   let h = 5381
   for (let i = 0; i < contents.length; i++) h = ((h << 5) + h + contents.charCodeAt(i)) | 0
-  return `${name}:${contents.length}:${(h >>> 0).toString(36)}`
+  const key = `${name}:${contents.length}:${(h >>> 0).toString(36)}`
+  // Accounting for the streaming re-tokenize hypothesis (see lib/pierrePerf.ts).
+  // This is the right site because it is the one place that observes both halves
+  // of the cost: the O(n) hash just paid, and the key whose churn decides whether
+  // Pierre reuses cached tokens or re-tokenizes the whole file again. The
+  // separator is NUL because a file name may itself contain ':'.
+  recordCacheKey(`${surface}\u0000${name}`, key, contents.length)
+  return key
 }
 
 /** Rewrites hand-written patches into ones Pierre's parser accepts.
@@ -241,6 +256,12 @@ const workerPool = typeof window === 'undefined' || typeof Worker === 'undefined
       highlighterOptions: { theme: PIERRE_THEMES },
     })
 
+// Report highlight churn once this module is live. Placed here rather than in
+// `main.tsx` so the timer only ever runs in a realm that actually renders code:
+// this module is reached through the `React.lazy` boundaries in `./index`, so a
+// tab that never shows a diff never starts it.
+startPierrePerfReporting()
+
 /** Hands every descendant the shared pool. Exported because the editor surface
  *  lives in a sibling module and needs the same one — without it Pierre falls
  *  back to `workerManager === undefined` and tokenizes on the main thread. */
@@ -311,7 +332,7 @@ export function PierrePatchImpl({ patch, options, className, renderHeaderMetadat
           const prev = f.prevName.slice(2)
           f.prevName = prev === f.name ? undefined : prev
         }
-        f.cacheKey = contentCacheKey(f.name ?? '', patch)
+        f.cacheKey = contentCacheKey(f.name ?? '', patch, 'patch')
       }
       return parsed
     } catch {
@@ -366,11 +387,11 @@ export function PierreFilePairImpl({ oldFile, newFile, options, className, rende
   // happen from our call sites (DiffPanel banners the identical case away and
   // new/deleted files carry one side), but the type demands the narrowing.
   const keyedOld = useMemo(
-    () => (oldFile ? { ...oldFile, cacheKey: contentCacheKey(oldFile.name, oldFile.contents) } : null),
+    () => (oldFile ? { ...oldFile, cacheKey: contentCacheKey(oldFile.name, oldFile.contents, 'diff-old') } : null),
     [oldFile],
   )
   const keyedNew = useMemo(
-    () => (newFile ? { ...newFile, cacheKey: contentCacheKey(newFile.name, newFile.contents) } : null),
+    () => (newFile ? { ...newFile, cacheKey: contentCacheKey(newFile.name, newFile.contents, 'diff-new') } : null),
     [newFile],
   )
   if (!keyedOld && !keyedNew) return null

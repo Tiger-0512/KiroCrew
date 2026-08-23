@@ -93,7 +93,7 @@ export const PierreEditorImpl = forwardRef<PierreEditorHandle, {
   const baseFile = useMemo<FileContents | null>(
     () => (diffBase == null
       ? null
-      : { name: file.name, contents: diffBase, cacheKey: contentCacheKey(file.name, diffBase) }),
+      : { name: file.name, contents: diffBase, cacheKey: contentCacheKey(file.name, diffBase, 'edit-base') }),
     [diffBase, file.name],
   )
   const editorRef = useRef<Editor<undefined> | null>(null)
