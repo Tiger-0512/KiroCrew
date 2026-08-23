@@ -872,11 +872,18 @@ accepted wake count, plus only a small failed/pending/unknown name sample),
 omitting wake instructions and browser/persistence internals. Inspection reports
 unavailable when strict identity is absent; it never falls back to the
 process-ancestor resolver.
-The legacy `monitor_start` descriptor routes public GitHub pull-request readiness
+The legacy `monitor_start` descriptor routes supported pull-request readiness
 through `monitor_watch` only when typed provider facts fully determine the
 objective. Objectives that require interpreting comments or advisory review
 evidence keep a finite legacy loop instead of claiming the structured probe
 observes those facts.
+
+`monitor_watch.kind` is the closed set `github_pull_request`,
+`gitlab_merge_request`, `azure_devops_pull_request`, and
+`bitbucket_pull_request`, all with the `review_ready` objective. Its target is a
+canonical provider URL and is parsed against that kind before a directive is
+emitted. A later target-only update is revalidated against the retained kind by
+the authoritative session consumer.
 
 ### The one allowed exception: caller-agnostic process caches
 

@@ -42,6 +42,7 @@ from kiro_crew.monitoring.models import (
     MIN_MONITOR_CADENCE_SECS,
     MONITOR_STATE_VERSION,
     MONITOR_STOP_UNSUPPORTED_VERSION,
+    PULL_REQUEST_MONITOR_KINDS,
     MonitorBudgets,
     MonitorState,
     monitor_state_public_dict,
@@ -53,6 +54,15 @@ logger = logging.getLogger(__name__)
 
 _CODE_DASHBOARD_OWNER_REQUIRED = "dashboard_owner_required"
 _CODE_INTERNAL_SECRET_REQUIRED = "internal_secret_required"
+
+
+async def ensure_gitlab_hosts_loaded() -> frozenset[str]:
+    """Load provider host policy only when a monitor mutation needs it."""
+    from kiro_crew.dashboard.handlers.source_providers import (
+        ensure_gitlab_hosts_loaded as load_hosts,
+    )
+
+    return await load_hosts()
 
 
 def render_nudge_message(message: str, stop_sentinel_path: str | None) -> str:
@@ -184,14 +194,28 @@ def _bounded_int(body: dict[str, Any], name: str, default: int, minimum: int, ma
     return raw
 
 
-def _monitor_config(body: dict[str, Any]) -> MonitorState:
-    from kiro_crew.monitoring.github_pull_request import parse_github_pull_request_target
+def _monitor_config(body: dict[str, Any], *, gitlab_hosts: frozenset[str]) -> MonitorState:
+    from kiro_crew.monitoring.targets import (
+        infer_pull_request_kind,
+        normalize_pull_request_target,
+    )
 
-    kind = body.get("kind", "github_pull_request")
+    raw_target = body.get("target", "")
+    kind = body.get("kind")
+    allowed_gitlab_hosts = tuple(gitlab_hosts)
+    if kind is None:
+        kind = infer_pull_request_kind(
+            raw_target,
+            gitlab_hosts=allowed_gitlab_hosts,
+        )
     objective = body.get("objective", "review_ready")
-    if kind != "github_pull_request" or objective != "review_ready":
-        raise ValueError("only github_pull_request review_ready monitors are supported")
-    target = parse_github_pull_request_target(body.get("target", "")).url
+    if kind not in PULL_REQUEST_MONITOR_KINDS or objective != "review_ready":
+        raise ValueError("only supported pull-request review_ready monitors are accepted")
+    target = normalize_pull_request_target(
+        kind,
+        raw_target,
+        gitlab_hosts=allowed_gitlab_hosts,
+    )
     wake = body.get("wake_instructions", "")
     if not isinstance(wake, str) or len(wake) > MAX_MONITOR_WAKE_INSTRUCTIONS_CHARS:
         raise ValueError(
@@ -324,11 +348,16 @@ async def api_monitor_create(request: web.Request) -> web.Response:
     svc = _autonudge_get()
     if svc is None:
         return _monitor_error("monitoring disabled", "monitoring_disabled", status=503)
+    from kiro_crew.monitoring.targets import GitLabHostNotAllowed
+
     try:
         body = await request.json()
         if not isinstance(body, dict):
             raise ValueError("request body must be an object")
-        config = _monitor_config(body)
+        gitlab_hosts = await ensure_gitlab_hosts_loaded()
+        config = _monitor_config(body, gitlab_hosts=gitlab_hosts)
+    except GitLabHostNotAllowed as exc:
+        return _monitor_error(str(exc), "gitlab_host_not_allowed")
     except Exception as exc:
         return _monitor_error(str(exc), "invalid_monitor")
     loop, error, status = await authorize_and_add_nudge(
@@ -364,6 +393,8 @@ async def api_monitor_update(request: web.Request) -> web.Response:
     )
     if loop is None or loop.monitor is None:
         return _monitor_error("structured monitor not found", "monitor_not_found", status=404)
+    from kiro_crew.monitoring.targets import GitLabHostNotAllowed
+
     try:
         body = await request.json()
         if not isinstance(body, dict):
@@ -382,7 +413,10 @@ async def api_monitor_update(request: web.Request) -> web.Response:
             ),
             "wake_instructions": body.get("wake_instructions", current.wake_instructions),
         }
-        config = _monitor_config(merged)
+        gitlab_hosts = await ensure_gitlab_hosts_loaded()
+        config = _monitor_config(merged, gitlab_hosts=gitlab_hosts)
+    except GitLabHostNotAllowed as exc:
+        return _monitor_error(str(exc), "gitlab_host_not_allowed")
     except Exception as exc:
         return _monitor_error(str(exc), "invalid_monitor")
     patch: dict[str, Any] = {}
