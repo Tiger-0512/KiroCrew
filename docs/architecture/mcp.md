@@ -872,6 +872,11 @@ accepted wake count, plus only a small failed/pending/unknown name sample),
 omitting wake instructions and browser/persistence internals. Inspection reports
 unavailable when strict identity is absent; it never falls back to the
 process-ancestor resolver.
+The legacy `monitor_start` descriptor routes public GitHub pull-request readiness
+through `monitor_watch` only when typed provider facts fully determine the
+objective. Objectives that require interpreting comments or advisory review
+evidence keep a finite legacy loop instead of claiming the structured probe
+observes those facts.
 
 ### The one allowed exception: caller-agnostic process caches
 

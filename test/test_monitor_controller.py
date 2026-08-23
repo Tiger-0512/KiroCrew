@@ -477,9 +477,11 @@ async def test_busy_delivery_retry_is_bounded_by_monitor_runtime(tmp_path):
     )
     controller = MonitorController(service, dispatched, provider=provider)
 
-    await controller.tick(loop, now=110.0)
-    await controller.tick(loop, now=125.0)
+    first = await controller.tick(loop, now=110.0)
+    expired = await controller.tick(loop, now=125.0)
 
+    assert first is MonitorDecision.WAKE_ACTIONABLE
+    assert expired is MonitorDecision.STOP_BUDGET
     assert len(provider.previous) == 1
     assert dispatched.await_count == 1
     assert loop.monitor is not None
@@ -519,8 +521,9 @@ async def test_cadence_edits_during_busy_preserve_retry_and_runtime_bound(tmp_pa
     assert loop.monitor.completion_evidence_deadline == 0.0
     assert service._timers.get(loop.id) is retry_timer
 
-    await controller.tick(loop, now=retry_at)
+    expired = await controller.tick(loop, now=retry_at)
 
+    assert expired is MonitorDecision.STOP_BUDGET
     assert len(provider.previous) == 1
     assert dispatched.await_count == 1
     assert not loop.active
