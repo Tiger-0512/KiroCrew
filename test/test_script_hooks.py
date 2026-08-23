@@ -220,7 +220,15 @@ class TestRunScriptHook:
         assert result.exit_code == 0
         assert "success" in result.stdout
         assert result.error == ""
-        assert result.duration_ms > 0
+        # ``>= 0``, not ``> 0``: ``duration_ms`` is ``int((monotonic() - start) *
+        # 1000)``, so a command that finishes in under a millisecond truncates to
+        # 0 legitimately — and ``echo`` on Windows' coarser clock does exactly
+        # that, which made this a platform-dependent flake. The guarantee worth
+        # asserting here is that the field is MEASURED and never negative; that it
+        # tracks real elapsed time is pinned by ``test_timeout`` below, where the
+        # hook runs long enough for the value to be meaningful (>= 1000).
+        assert isinstance(result.duration_ms, int)
+        assert result.duration_ms >= 0
 
     @pytest.mark.asyncio
     async def test_non_zero_exit(self):
