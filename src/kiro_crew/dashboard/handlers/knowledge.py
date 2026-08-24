@@ -53,6 +53,7 @@ from kiro_crew.knowledge.llm_pool import DEFAULT_EXTRACTION_EFFORT, LLMPool
 from kiro_crew.knowledge.readers import FileReader
 from kiro_crew.knowledge.retrieval import HybridRetriever
 from kiro_crew.knowledge.spend import source_spend
+from kiro_crew.knowledge.store import KnowledgeBundleError
 from kiro_crew.knowledge.sync import SyncScheduler
 from kiro_crew.knowledge.watcher import KnowledgeWatcher
 from kiro_crew.messaging.raster import SNIFF_BYTES
@@ -1620,7 +1621,10 @@ async def import_bundle(request: web.Request) -> web.Response:
         rel["description"] = _redact(rel.get("description"))
     try:
         result = _store(request).import_bundle(body)
-    except (KeyError, sqlite3.Error, OverflowError) as exc:
+    except (KnowledgeBundleError, KeyError, sqlite3.Error, OverflowError) as exc:
+        # KnowledgeBundleError: the store enforces the JSON-column
+        # well-formedness invariant (sources.properties / entities.aliases)
+        # at the writer; surface its typed rejection as a clean 400.
         # OverflowError: a bundle integer field (e.g. chunk_index) too large
         # for SQLite's 64-bit INTEGER, raised at bind time inside the store
         # call -- neither a KeyError nor a sqlite3.Error, so it needs its own
