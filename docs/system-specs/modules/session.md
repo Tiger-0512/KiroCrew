@@ -326,6 +326,52 @@ parent snapshot + accumulated side history.
 - `close_all()`: saves all active mappings before killing processes.
 - `start_pool()`: prunes stale entries (files deleted by kiro-cli GC).
 
+### Asking for a fresh conversation on a slot that stays open
+
+`POST /api/chat/slots/{slot}/reset-conversation` drops one slot's resume pointer
+through the LIVE manager (`discard_conversation`), so its next turn cold-starts
+instead of `session/load`-ing the accumulated conversation. The slot stays open,
+the transcript stays on disk, and the map ENTRY survives with its channel
+linkage.
+
+This closes a gap rather than adding a capability: resume is key-driven and a
+slot key is stable by design, which is correct for a tab reopened later and wrong
+once a long-lived conversation has drifted, filled up, or outlived what it was
+about. The only reachable way to break the link was `DELETE /api/sessions/{key}`,
+which destroys the record in order to reset the pointer — so "start over" and
+"erase this" were the same button.
+
+Three properties the route holds, each of which fails silently if broken:
+
+- The key comes from `effective_session_key(slot)`, never a derived
+  `dashboard:<slot>`: a channel-born slot's turns run on the channel's session,
+  and the derived form yields a key no session ever had — the clear finds nothing
+  and the call still reports success.
+- `discard_conversation`, never `destroy`: the entry carries the Slack
+  thread/channel linkage and the reverse index built from it.
+- It is nonetheless a FULL teardown (provider shutdown plus
+  `release_subagent_runtime`), so it takes the same guards the sibling `reload`
+  route does, through the same shared helpers rather than a third policy:
+  `_app_cancel_denied` on the resolved SESSION key, `slot.running` widened with
+  `slot._in_stage_execution`, and `_subagents_attached_response`. Each protects
+  work invisible from outside — a turn mid-write, a plan between stages, and
+  children still running after their parent's turn ended.
+
+Authorization is `_app_cancel_denied`, not a slot-ownership check, and that
+distinction is load-bearing: `get_or_create_slot` resolves `linked_session_key`
+from the session map for a name shaped like a channel stem, so an app that names a
+live channel thread ends up OWNING a slot bound to a conversation it has no claim
+on. Ownership alone would let it wipe that channel conversation's resume pointer.
+The helper tests the key the caller will actually act on, and runs BEFORE the 409s
+so a refusal cannot confirm the slot exists. Reaching the route needs
+`/api/chat/slots` in the app's manifest `permissions.api`, and the capability it
+grants is strictly smaller than the delete it already implies.
+
+The transcript is deliberately left in place, so the tab still shows earlier
+messages the model no longer remembers. That is the honest rendering — the record
+is the user's, the context was the conversation's — and it is why this is an
+explicit request rather than something the gateway does on its own.
+
 ### Load Recovery (stale native session lock — F2)
 
 On restart / Make-Live cutover the previous gateway's kiro-cli is killed. If it

@@ -2505,9 +2505,7 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
     if denied is not None:
         return denied
     force = request.query.get("force", "").lower() == "true"
-    return web.json_response(
-        await stop_slot_turn(state, slot, force=force, cancel_key=cancel_key)
-    )
+    return web.json_response(await stop_slot_turn(state, slot, force=force, cancel_key=cancel_key))
 
 
 async def api_chat_slot_continue(request: web.Request) -> web.Response:
@@ -3150,6 +3148,99 @@ async def _restore_slot_nudge_loop(loop: "NudgeLoop | None") -> None:
         # too. The 500 already tells the caller the close did not happen; the
         # retired loop is visible as gone in the dashboard, not silently dead.
         logger.warning("autonudge loop restore after failed slot close failed", exc_info=True)
+
+
+async def api_chat_slot_reset_conversation(request: web.Request) -> web.Response:
+    """POST /api/chat/slots/{slot}/reset-conversation — a fresh conversation, same slot.
+
+    Drops the slot's resume pointer, so its next turn cold-starts a new native
+    conversation instead of ``session/load``-ing the accumulated one. Everything
+    else survives: the slot stays open, its transcript stays on disk, and the
+    session-map ENTRY keeps its channel linkage.
+
+    This capability existed internally with no way to ask for it. Resume is
+    key-driven — ``resume_sid = self._session_map.get(key)`` — and a slot key is
+    stable by design, so reopening one continues where it left off. That is the
+    point for a tab the user closed and came back to. It is NOT what a caller
+    wants after a long-lived conversation has drifted, filled up, or outlived the
+    thing it was about; and until now the only way to break the link was to
+    DELETE the session from history, which destroys the record to reset the
+    pointer. This separates the two.
+
+    ``discard_conversation``, not ``destroy``: the entry also carries the Slack
+    thread/channel linkage and the reverse index built from it, so dropping the
+    row would silently unlink a mirrored session. The dropped value is stashed as
+    ``discarded_sid``, so this is diagnosable and reversible by hand.
+
+    It is nonetheless a FULL teardown — it shuts the provider down and releases
+    the shared sub-agent runtime — so it takes the same guards the sibling
+    teardown route does, through the same shared helpers rather than a third
+    policy of its own: authorization on the SESSION (not merely the slot),
+    ``running`` widened with ``_in_stage_execution``, and the sub-agent gate.
+    Each of the three protects work the caller cannot see from the outside: a
+    turn mid-write, a plan between stages, and children still running after their
+    parent's turn ended.
+
+    The transcript is deliberately left in place, which means the tab still shows
+    the earlier messages while the model no longer remembers them. That is the
+    honest rendering of what happened — the record is the user's, the context was
+    the conversation's — and it is why this is a deliberate action rather than
+    something the gateway does on its own.
+    """
+    state: DashboardState = request.app["state"]
+    name = request.match_info["slot"]
+    slot = state._slots.get(name)
+    if not slot:
+        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+
+    # Resolved before authorization, because what has to be authorized is the
+    # SESSION this will clear, not the slot it was reached through.
+    key = effective_session_key(slot)
+
+    # Slot ownership does not imply ownership of that session:
+    # ``get_or_create_slot`` resolves ``linked_session_key`` from the session map
+    # for a name shaped like a channel stem, so an app that names a live channel
+    # thread ends up owning a slot bound to a conversation it has no claim on.
+    # ``_app_cancel_denied`` is the shared policy for exactly that, and it tests
+    # the key the caller will actually act on. Answers an indistinguishable 404,
+    # and runs BEFORE the 409s below so a refusal cannot confirm the slot exists.
+    denied = _app_cancel_denied(request, slot, "slot_reset_conversation", key)
+    if denied is not None:
+        return denied
+
+    if slot.running:
+        return web.json_response(
+            {
+                "error": "a turn is running on this slot",
+                "code": "turn_in_flight",
+                "slot": name,
+            },
+            status=409,
+        )
+    if slot._in_stage_execution:
+        # An autopilot plan reads ``running`` False BETWEEN stages while it is
+        # still mid-plan, so ``running`` alone would discard the conversation the
+        # plan is writing into and cold-start its next stage.
+        return web.json_response(
+            {"error": "slot is orchestrating", "code": "slot_orchestrating", "slot": name},
+            status=409,
+        )
+    # ``discard_conversation`` is a full teardown: it also releases the shared
+    # sub-agent runtime the parent's children run on. ``slot.running`` is False
+    # while they keep going — the parent turn ends first — so nothing above
+    # catches it, and the same guard the reload route uses is what does.
+    attached = _subagents_attached_response(state, slot, key, "slot_reset_conversation")
+    if attached is not None:
+        return attached
+
+    await state.sessions.discard_conversation(key)
+    sel().log_api_access(
+        caller=request.get("app", "") or "dashboard",
+        operation="slot_reset_conversation",
+        outcome="completed",
+        resources=f"slot={name}",
+    )
+    return web.json_response({"slot": name, "reset": True})
 
 
 async def api_chat_slot_delete(request: web.Request) -> web.Response:
