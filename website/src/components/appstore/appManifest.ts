@@ -103,6 +103,18 @@ export const APP_MANIFEST_KEY: Record<string, ManifestKeys> = {
       'apps.autoResearch.manifest.highlight_7',
     ],
   },
+  'aws-control': {
+    displayName: 'apps.awsControl.manifest.display_name',
+    description: 'apps.awsControl.manifest.description',
+    pageLabel: 'apps.awsControl.manifest.page_label',
+    highlights: [
+      'apps.awsControl.manifest.highlight_1',
+      'apps.awsControl.manifest.highlight_2',
+      'apps.awsControl.manifest.highlight_3',
+      'apps.awsControl.manifest.highlight_4',
+      'apps.awsControl.manifest.highlight_5',
+    ],
+  },
   'channels': {
     displayName: 'apps.channels.manifest.display_name',
     description: 'apps.channels.manifest.description',

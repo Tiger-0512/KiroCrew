@@ -996,6 +996,19 @@ _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
         "substitute for redaction. `rating` (a fixed frontend enum) is not run "
         "through this pass.",
     ),
+    (
+        "AWS Control error responses",
+        "apps/builtins/aws_control/backend/routes.py",
+        "Error text returned by the aws-control builtin's HTTP surface. The app "
+        "shells out to the AWS CLI (via the deploy engine chokepoint), and a "
+        "failed call's stderr can quote back a `credential_process` command "
+        "line, an SSO URL, a role ARN, or an endpoint override carrying inline "
+        "credentials. Every outbound error string (the `aws_call_failed` "
+        "bodies, the bill card's `fetchError`, backup's `remoteError`, and the "
+        "library `not_pushable` message) funnels through one `_safe_error` "
+        "chokepoint that applies the deploy handlers' credential + "
+        "exfiltration-URL chain before the text reaches the dashboard.",
+    ),
 )
 
 # Modules that call a redactor but are NOT an output egress boundary, so they do

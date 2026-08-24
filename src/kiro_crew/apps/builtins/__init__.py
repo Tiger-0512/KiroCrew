@@ -3,6 +3,7 @@
 BUILTIN_NAMES: list[str] = [
     "auto_improvement",
     "auto_research",
+    "aws_control",
     "code_review_sage",
     "crew_companion",
     "issue_radar",
