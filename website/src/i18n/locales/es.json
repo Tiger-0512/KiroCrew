@@ -2508,6 +2508,7 @@
           "no_frontier": "No hay elementos abiertos con dependencias registradas.",
           "waiting_heading": "EN ESPERA ({{n}})",
           "more_waiting": "… +{{n}} más",
+          "fewer_waiting": "Mostrar menos",
           "why_all_satisfied": "Todos los bloqueadores satisfechos: {{refs}}",
           "why_waiting": "A la espera de {{refs}}",
           "why_satisfied": "Ya satisfechos: {{refs}}",

@@ -2454,6 +2454,7 @@
           "no_frontier": "의존성이 기록된 열린 항목이 없습니다.",
           "waiting_heading": "대기 중({{n}})",
           "more_waiting": "… {{n}}개 더",
+          "fewer_waiting": "간략히 보기",
           "why_all_satisfied": "모든 차단 항목 해소됨: {{refs}}",
           "why_waiting": "대기 중: {{refs}}",
           "why_satisfied": "해소됨: {{refs}}",

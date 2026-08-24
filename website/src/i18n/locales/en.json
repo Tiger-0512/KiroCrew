@@ -1474,6 +1474,7 @@
           "no_frontier": "No open items with dependencies on record.",
           "waiting_heading": "WAITING ({{n}})",
           "more_waiting": "… +{{n}} more",
+          "fewer_waiting": "Show fewer",
           "why_all_satisfied": "All blockers satisfied: {{refs}}",
           "why_waiting": "Waiting on {{refs}}",
           "why_satisfied": "Already satisfied: {{refs}}",

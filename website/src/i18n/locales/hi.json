@@ -2465,6 +2465,7 @@
           "no_frontier": "दर्ज निर्भरताओं वाला कोई खुला आइटम नहीं।",
           "waiting_heading": "प्रतीक्षारत ({{n}})",
           "more_waiting": "… +{{n}} और",
+          "fewer_waiting": "कम दिखाएं",
           "why_all_satisfied": "सभी ब्लॉकर पूरे: {{refs}}",
           "why_waiting": "प्रतीक्षा में {{refs}}",
           "why_satisfied": "पहले से पूरे: {{refs}}",

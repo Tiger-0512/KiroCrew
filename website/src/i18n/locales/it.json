@@ -2508,6 +2508,7 @@
           "no_frontier": "Nessun elemento aperto con dipendenze registrate.",
           "waiting_heading": "IN ATTESA ({{n}})",
           "more_waiting": "… +{{n}} altri",
+          "fewer_waiting": "Mostra meno",
           "why_all_satisfied": "Tutti i bloccanti soddisfatti: {{refs}}",
           "why_waiting": "In attesa di {{refs}}",
           "why_satisfied": "Già soddisfatti: {{refs}}",

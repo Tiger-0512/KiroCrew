@@ -2422,6 +2422,7 @@
           "no_frontier": "没有记录了依赖的未关闭条目。",
           "waiting_heading": "等待中（{{n}}）",
           "more_waiting": "… 还有 {{n}} 个",
+          "fewer_waiting": "收起",
           "why_all_satisfied": "所有阻塞项已满足：{{refs}}",
           "why_waiting": "正在等待 {{refs}}",
           "why_satisfied": "已满足：{{refs}}",

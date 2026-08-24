@@ -2454,6 +2454,7 @@
           "no_frontier": "依存関係が記録されたオープン項目はありません。",
           "waiting_heading": "待機中（{{n}}）",
           "more_waiting": "… ほか {{n}} 件",
+          "fewer_waiting": "表示を減らす",
           "why_all_satisfied": "すべてのブロッカーが解消: {{refs}}",
           "why_waiting": "待機中: {{refs}}",
           "why_satisfied": "解消済み: {{refs}}",

@@ -2540,6 +2540,7 @@
           "no_frontier": "Aucun élément ouvert avec des dépendances enregistrées.",
           "waiting_heading": "EN ATTENTE ({{n}})",
           "more_waiting": "… +{{n}} autres",
+          "fewer_waiting": "Afficher moins",
           "why_all_satisfied": "Tous les bloqueurs satisfaits : {{refs}}",
           "why_waiting": "En attente de {{refs}}",
           "why_satisfied": "Déjà satisfaits : {{refs}}",

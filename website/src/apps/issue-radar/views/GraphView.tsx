@@ -91,6 +91,12 @@ export default function GraphView() {
   const [view, setView] = useState<SubView>('frontier')
   const [root, setRoot] = useState<number | null>(null)
   const [jump, setJump] = useState('')
+  // FRONTIER: which waiting row a jump asked to reveal, and whether the full
+  // waiting list is expanded. A jump to a row beyond WAITING_CAP force-expands
+  // so the target is actually in the DOM to scroll to. `seq` bumps on every
+  // jump so re-jumping to the same id re-triggers the scroll effect.
+  const [showAllWaiting, setShowAllWaiting] = useState(false)
+  const [reveal, setReveal] = useState<{ id: number; seq: number } | null>(null)
 
   // Build the full-graph nodes once per payload; every view derives from this.
   const built = useMemo(
@@ -158,7 +164,19 @@ export default function GraphView() {
 
   const onJump = (raw: string) => {
     const n = parseInt(raw, 10)
-    if (Number.isFinite(n) && nodes.has(n)) { focusOn(n); setJump('') }
+    if (!Number.isFinite(n) || !nodes.has(n)) return
+    if (view === 'focus') {
+      // FOCUS: re-root the tree, exactly as before.
+      focusOn(n)
+      setJump('')
+      return
+    }
+    // FRONTIER: reveal the matching row in place. If it is a waiting row past
+    // the collapsed cap, expand the list first so the row exists to scroll to.
+    const idx = waitingItems.findIndex((f) => f.node.id === n)
+    if (idx >= WAITING_CAP) setShowAllWaiting(true)
+    setReveal((r) => ({ id: n, seq: (r?.seq ?? 0) + 1 }))
+    setJump('')
   }
 
   return (
@@ -188,31 +206,27 @@ export default function GraphView() {
           ))}
         </div>
         <div className="ml-auto flex items-center gap-2">
-          {view === 'focus' && (
-            <>
-              {/* label both nests the control AND carries htmlFor/id — the a11y
-                  rule requires both, and a nested visually-hidden label span
-                  keeps the header compact. */}
-              <label htmlFor="ir-graph-jump" className="contents">
-                <span className="sr-only">{i18nT('apps.issueRadar.views.graphView.jump_label')}</span>
-                <input
-                  id="ir-graph-jump"
-                  list="ir-graph-open-items"
-                  value={jump}
-                  onChange={(e) => setJump(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') onJump((e.target as HTMLInputElement).value) }}
-                  placeholder={i18nT('apps.issueRadar.views.graphView.jump_placeholder')}
-                  aria-label={i18nT('apps.issueRadar.views.graphView.jump_label')}
-                  className="w-40 md:w-52 bg-card border border-border-strong text-text px-2.5 py-1 rounded-sm text-[11px] focus:outline-none focus:border-accent"
-                />
-              </label>
-              <datalist id="ir-graph-open-items">
-                {opens.map((n) => (
-                  <option key={n.id} value={n.id}>{(n.title || '').slice(0, 50)}</option>
-                ))}
-              </datalist>
-            </>
-          )}
+          {/* Jump-to-issue: in FOCUS it re-roots the tree; in FRONTIER it
+              reveals/scrolls to the matching row (expanding the waiting
+              overflow when the row sits past the collapsed cap). */}
+          <label htmlFor="ir-graph-jump" className="contents">
+            <span className="sr-only">{i18nT('apps.issueRadar.views.graphView.jump_label')}</span>
+            <input
+              id="ir-graph-jump"
+              list="ir-graph-open-items"
+              value={jump}
+              onChange={(e) => setJump(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') onJump((e.target as HTMLInputElement).value) }}
+              placeholder={i18nT('apps.issueRadar.views.graphView.jump_placeholder')}
+              aria-label={i18nT('apps.issueRadar.views.graphView.jump_label')}
+              className="w-40 md:w-52 bg-card border border-border-strong text-text px-2.5 py-1 rounded-sm text-[11px] focus:outline-none focus:border-accent"
+            />
+          </label>
+          <datalist id="ir-graph-open-items">
+            {opens.map((n) => (
+              <option key={n.id} value={n.id}>{(n.title || '').slice(0, 50)}</option>
+            ))}
+          </datalist>
           <button
             onClick={() => depsQuery.refetch()}
             disabled={depsQuery.isFetching}
@@ -231,6 +245,9 @@ export default function GraphView() {
           waiting={waitingItems}
           reduceMotion={!!reduceMotion}
           onOpenTree={focusOn}
+          showAllWaiting={showAllWaiting}
+          onToggleWaiting={() => setShowAllWaiting((s) => !s)}
+          reveal={reveal}
         />
       ) : (
         <FocusTree
@@ -260,14 +277,39 @@ export default function GraphView() {
 
 /* ── FRONTIER ─────────────────────────────────────────────────────────── */
 
-function Frontier({ ready, waiting, reduceMotion, onOpenTree }: {
+function Frontier({ ready, waiting, reduceMotion, onOpenTree, showAllWaiting, onToggleWaiting, reveal }: {
   ready: FrontierItem[]
   waiting: FrontierItem[]
   reduceMotion: boolean
   onOpenTree: (id: number) => void
+  showAllWaiting: boolean
+  onToggleWaiting: () => void
+  reveal: { id: number; seq: number } | null
 }) {
-  const shownWaiting = waiting.slice(0, WAITING_CAP)
+  const shownWaiting = showAllWaiting ? waiting : waiting.slice(0, WAITING_CAP)
   const overflow = waiting.length - shownWaiting.length
+  // Row DOM refs, keyed by node id, so a jump can scroll the matching row into
+  // view and flash a brief accent ring on it.
+  const rowRefs = useRef(new Map<number, HTMLDivElement | null>())
+
+  useEffect(() => {
+    if (!reveal) return
+    const el = rowRefs.current.get(reveal.id)
+    if (el) {
+      el.scrollIntoView({ block: 'center', behavior: reduceMotion ? 'auto' : 'smooth' })
+      // A brief accent ring so the eye lands on the right row.
+      el.setAttribute('data-ir-reveal', '1')
+      const t = setTimeout(() => el.removeAttribute('data-ir-reveal'), 1600)
+      return () => clearTimeout(t)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal?.id, reveal?.seq])
+
+  const setRowRef = useCallback((id: number, el: HTMLDivElement | null) => {
+    if (el) rowRefs.current.set(id, el)
+    else rowRefs.current.delete(id)
+  }, [])
+
   return (
     <div className="flex-1 min-h-0 overflow-y-auto px-2 md:px-6 py-5">
       <h2 className="text-[11px] tracking-[.26em] text-text-strong font-semibold mb-0.5">
@@ -282,7 +324,7 @@ function Frontier({ ready, waiting, reduceMotion, onOpenTree }: {
       )}
 
       {ready.map((f) => (
-        <FrontierRow key={f.node.id} item={f} unlocked reduceMotion={reduceMotion} onOpenTree={onOpenTree} />
+        <FrontierRow key={f.node.id} item={f} unlocked reduceMotion={reduceMotion} onOpenTree={onOpenTree} rowRef={setRowRef} />
       ))}
 
       {waiting.length > 0 && (
@@ -290,30 +332,46 @@ function Frontier({ ready, waiting, reduceMotion, onOpenTree }: {
           {i18nT('apps.issueRadar.views.graphView.waiting_heading', { n: waiting.length })}
         </div>
       )}
-      {shownWaiting.map((f) => (
-        <FrontierRow key={f.node.id} item={f} unlocked={false} reduceMotion={reduceMotion} onOpenTree={onOpenTree} />
-      ))}
-      {overflow > 0 && (
-        <div className="max-w-[820px] text-[10px] text-muted-strong mt-1.5">
-          {i18nT('apps.issueRadar.views.graphView.more_waiting', { n: overflow })}
+      <div id="ir-frontier-waiting">
+        {shownWaiting.map((f) => (
+          <FrontierRow key={f.node.id} item={f} unlocked={false} reduceMotion={reduceMotion} onOpenTree={onOpenTree} rowRef={setRowRef} />
+        ))}
+      </div>
+      {waiting.length > WAITING_CAP && (
+        <div className="max-w-[820px] mt-1.5">
+          <button
+            type="button"
+            onClick={onToggleWaiting}
+            aria-expanded={showAllWaiting}
+            aria-controls="ir-frontier-waiting"
+            className="text-[10px] text-muted-strong hover:text-text underline underline-offset-2 cursor-pointer bg-transparent border-none p-0 font-mono"
+          >
+            {showAllWaiting
+              ? i18nT('apps.issueRadar.views.graphView.fewer_waiting')
+              : i18nT('apps.issueRadar.views.graphView.more_waiting', { n: overflow })}
+          </button>
         </div>
       )}
     </div>
   )
 }
 
-function FrontierRow({ item, unlocked, reduceMotion, onOpenTree }: {
+function FrontierRow({ item, unlocked, reduceMotion, onOpenTree, rowRef }: {
   item: FrontierItem
   unlocked: boolean
   reduceMotion: boolean
   onOpenTree: (id: number) => void
+  rowRef?: (id: number, el: HTMLDivElement | null) => void
 }) {
   const [open, setOpen] = useState(false)
   const { node, blockers, waitingOn } = item
   const satisfied = blockers.filter((b) => b.state === 'done')
   const idColor = unlocked ? 'var(--accent)' : 'var(--warn)'
   return (
-    <div className="max-w-[820px] mb-2 border border-border rounded-[3px] bg-card">
+    <div
+      ref={rowRef ? (el) => rowRef(node.id, el) : undefined}
+      className="max-w-[820px] mb-2 border border-border rounded-[3px] bg-card data-[ir-reveal]:border-accent"
+    >
       <button
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}

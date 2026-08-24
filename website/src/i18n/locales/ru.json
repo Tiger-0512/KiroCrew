@@ -2551,6 +2551,7 @@
           "no_frontier": "Нет открытых элементов с учтёнными зависимостями.",
           "waiting_heading": "В ОЖИДАНИИ ({{n}})",
           "more_waiting": "… ещё +{{n}}",
+          "fewer_waiting": "Показать меньше",
           "why_all_satisfied": "Все блокеры выполнены: {{refs}}",
           "why_waiting": "Ожидает {{refs}}",
           "why_satisfied": "Уже выполнены: {{refs}}",

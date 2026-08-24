@@ -2497,6 +2497,7 @@
           "no_frontier": "Keine offenen Vorgänge mit erfassten Abhängigkeiten.",
           "waiting_heading": "WARTEN ({{n}})",
           "more_waiting": "… +{{n}} weitere",
+          "fewer_waiting": "Weniger anzeigen",
           "why_all_satisfied": "Alle Blocker erfüllt: {{refs}}",
           "why_waiting": "Wartet auf {{refs}}",
           "why_satisfied": "Bereits erfüllt: {{refs}}",

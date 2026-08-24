@@ -2465,6 +2465,7 @@
           "no_frontier": "নথিভুক্ত নির্ভরতাসহ কোনো খোলা আইটেম নেই।",
           "waiting_heading": "অপেক্ষমাণ ({{n}})",
           "more_waiting": "… +{{n}}টি আরও",
+          "fewer_waiting": "কম দেখান",
           "why_all_satisfied": "সব ব্লকার পূরণ হয়েছে: {{refs}}",
           "why_waiting": "অপেক্ষায় {{refs}}",
           "why_satisfied": "ইতিমধ্যে পূরণ: {{refs}}",

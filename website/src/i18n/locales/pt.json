@@ -2508,6 +2508,7 @@
           "no_frontier": "Nenhum item aberto com dependências registradas.",
           "waiting_heading": "AGUARDANDO ({{n}})",
           "more_waiting": "… +{{n}} mais",
+          "fewer_waiting": "Mostrar menos",
           "why_all_satisfied": "Todos os bloqueadores satisfeitos: {{refs}}",
           "why_waiting": "Aguardando {{refs}}",
           "why_satisfied": "Já satisfeitos: {{refs}}",
