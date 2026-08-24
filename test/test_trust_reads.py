@@ -673,6 +673,84 @@ class TestIsReadOnlyBash:
         # One operand after the terminator is the input, and reads.
         assert is_read_only_bash("cat f | uniq -- input") is True
 
+    def test_a_construct_bash_deletes_cannot_forge_a_flag(self):
+        """`shlex` keeps the words bash REMOVES, so a fake flag reached the tables.
+
+        Every operand rule here reads `shlex.split`'s token list as if it were the
+        program's argv. A comment and a herestring break that by deleting words
+        rather than rewriting them, and `shlex` models neither:
+
+            git branch injected # --list    shlex keeps '#', '--list'
+                                            bash runs `git branch injected`
+
+        The `--list` this module reads never reaches git. It turns list mode on,
+        the bare `injected` is reclassified from "creates a ref" to "a pattern",
+        and the segment auto-approves — while bash creates the ref. Measured
+        against real git: `git branch injected # --list`, `git tag forged # --list`
+        and `git branch injected <<< --list` each created the ref.
+
+        The two halves are handled differently on purpose. Comment removal is not
+        a guess — once quoting is resolved, `#` at a word start kills the rest of
+        the line, full stop — so it is REPRODUCED and the real reason surfaces
+        ("creates a ref"). A redirect consumes a number of words that depends on
+        its form, so it is REFUSED instead of modelled.
+        """
+        assert is_read_only_bash("git branch injected # --list") is False
+        assert is_read_only_bash("git tag forged # --list") is False
+        assert is_read_only_bash("git branch injected <<< --list") is False
+        assert is_read_only_bash("git branch injected < --list") is False
+        # A comment elides to end of LINE, past the `&&` the segment split
+        # believes in, so the whole raw command has to be handled up front.
+        assert is_read_only_bash("git status && git branch injected # --list") is False
+        # Nothing is left to run, which is not a read.
+        assert is_read_only_bash("# git status") is False
+        # Because the comment is reproduced rather than refused, the rejection
+        # names the real defect instead of the construct that hid it.
+        assert "creates a ref" in unsafe_bash_reason("git branch injected # --list")
+
+    def test_a_stripped_comment_ends_at_the_newline_not_the_string(self):
+        """A comment kills its LINE; a later line still has to be classified.
+
+        Stripping to end of string would have hidden whatever followed on the
+        next line — turning a faithful reproduction of bash into a second, worse
+        elision bug in the opposite direction.
+        """
+        # Line 2 is still read and still caught.
+        assert is_read_only_bash("echo hi # note\ngit branch x") is False
+        # ... and still auto-approves when it is genuinely a read.
+        assert is_read_only_bash("echo hi # note\ngit status") is True
+
+    def test_an_elided_construct_is_detected_quote_aware(self):
+        """Both constructs are shell syntax only when unquoted, so quoting is honoured.
+
+        Scanning for a bare `#` or `<` would have cost the ordinary reads that
+        carry one as DATA, which is most of the ones that carry one at all.
+        """
+        # `#` inside quotes, and `#` mid-word, are not comments to bash.
+        assert is_read_only_bash("grep '#include' file") is True
+        assert is_read_only_bash("git log --grep '#123'") is True
+        assert is_read_only_bash("git log --grep=#123") is True
+        assert is_read_only_bash("echo a#b") is True
+        assert is_read_only_bash("grep \\# file") is True
+        # An ordinary trailing comment costs nothing: after the strip the command
+        # simply IS the read, so it keeps auto-approving. Agent-emitted bash
+        # carries one often enough that refusing the construct outright would
+        # have been a real auto-approve-rate loss.
+        assert is_read_only_bash("git status # note") is True
+        assert is_read_only_bash("ls -la # list files") is True
+        assert is_read_only_bash("grep -rn foo src # find it") is True
+        # A `<` inside a comment is deleted before the redirect check sees it.
+        assert is_read_only_bash("git status # see < file") is True
+        # The plain reads are untouched.
+        assert is_read_only_bash("git status") is True
+        assert is_read_only_bash("git branch --list 'feat/*'") is True
+        assert is_read_only_bash("cat f | sort -u") is True
+        # Stated cost: an unquoted input redirect is refused even where it is
+        # harmless, because the danger is the token-list divergence rather than
+        # the direction of the data.
+        assert is_read_only_bash("wc -l < file") is False
+        assert is_read_only_bash("grep pattern < file") is False
+
     def test_a_positional_or_special_parameter_hides_the_real_argument(self):
         """`$@` and `$1` are expansions whose NAME is not an identifier.
 

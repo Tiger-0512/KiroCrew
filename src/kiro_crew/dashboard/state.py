@@ -1479,6 +1479,133 @@ def _side_effect_reason(segment: str) -> str:
     return ""
 
 
+def _scan_unquoted(cmd: str):
+    """Yield ``(index, char, at_word_start)`` for every UNQUOTED char of *cmd*.
+
+    A single shared scanner so the comment stripper and the redirect check can
+    never disagree about what "unquoted" means. It models the three things a
+    shell does to quoting that `shlex` models differently or not at all:
+
+    * single quotes are literal all the way to the closing quote;
+    * inside double quotes a backslash still escapes;
+    * outside quotes a backslash escapes the next character (including a
+      newline, which is a line continuation and so does NOT end a line).
+
+    ``at_word_start`` is True at the start of the string and after unquoted
+    whitespace, which is exactly where a shell will read `#` as a comment.
+    """
+    quote: str | None = None
+    at_word_start = True
+    i = 0
+    n = len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if quote is not None:
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            at_word_start = False
+            continue
+        if ch == "\\" and i + 1 < n:
+            # An escaped character is data, including an escaped `#` or `<`,
+            # and an escaped newline is a continuation rather than a line end.
+            i += 2
+            at_word_start = False
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            at_word_start = False
+            continue
+        yield i, ch, at_word_start
+        at_word_start = ch.isspace()
+        i += 1
+
+
+def _strip_shell_comments(cmd: str) -> str:
+    """Delete bash comments from *cmd*, the way bash does, before classifying.
+
+    Every operand rule in this module reads `shlex.split`'s token list and
+    assumes it is the argv the program receives. A comment breaks that
+    assumption by DELETING words, and `shlex` has no concept of one — it hands
+    the pieces back as ordinary tokens:
+
+        git branch injected # --list      shlex: [… 'injected', '#', '--list']
+                                          bash:  git branch injected
+
+    The `--list` this module read never reached git. It flipped
+    `_GIT_REF_LIST_FLAGS` on, the bare `injected` was reclassified from "creates
+    a ref" to "a pattern", and the segment auto-approved — while bash created
+    the ref (measured against real git, along with the `git tag forged # --list`
+    spelling).
+
+    Unlike a redirect, comment removal is not a guess: once quoting is resolved
+    the deletion is total and unambiguous — `#` at a word start kills the rest
+    of the LINE, full stop. So this reproduces it rather than refusing it, and
+    the classifier then reasons over the same words bash will run. That keeps
+    the fix free: an ordinary trailing comment (`git status # note`) still
+    auto-approves, because after stripping it simply *is* `git status`.
+
+    To end of line, not end of string: `echo hi # note\ngit branch x` runs the
+    `git branch x` on the second line, so only the first line's tail goes.
+    """
+    if "#" not in cmd:
+        return cmd
+    cuts: list[tuple[int, int]] = []
+    for i, ch, at_word_start in _scan_unquoted(cmd):
+        if ch == "#" and at_word_start:
+            nl = cmd.find("\n", i)
+            cuts.append((i, len(cmd) if nl < 0 else nl))
+    if not cuts:
+        return cmd
+    out: list[str] = []
+    prev = 0
+    for begin, stop in cuts:
+        if begin < prev:  # already inside a removed span
+            continue
+        out.append(cmd[prev:begin])
+        prev = stop
+    out.append(cmd[prev:])
+    return "".join(out)
+
+
+def _elided_shell_construct(cmd: str) -> str:
+    """Reason *cmd* carries an input redirect, which removes words `shlex` keeps.
+
+    The sibling of the comment case above, and the one that cannot be
+    reproduced faithfully. `shlex` hands a redirect back as an ordinary token:
+
+        git branch injected <<< --list    shlex: [… 'injected', '<<<', '--list']
+                                          bash:  git branch injected
+
+    so the same forged `--list` flips list mode on and the segment
+    auto-approves while bash creates the ref (measured: `<<<` created it; `<`
+    auto-approved too and only failed because the file was missing).
+
+    Refused as a CLASS rather than reproduced, because how many words a
+    redirect consumes depends on its form, and deciding that means
+    reimplementing shell word removal on top of the quoting rules `shlex`
+    already models differently. A read-only command does not need one, and a
+    refused command falls through to the human approval prompt.
+
+    Quote-aware, so it costs no ordinary read: `<` is shell syntax only when
+    unquoted, and `grep "<div>" file` or `grep \\< file` is data.
+
+    Cost, stated rather than hidden: an unquoted input redirect is refused even
+    where it is genuinely harmless (`wc -l < file`, `grep pattern < file`),
+    since what makes it dangerous is the token-list divergence, not the
+    direction of the data. That is the fail-safe direction and the tests
+    assert it.
+    """
+    for _i, ch, _at_word_start in _scan_unquoted(cmd):
+        if ch == "<":
+            return "an input redirect removes words that `shlex` keeps"
+    return ""
+
+
 def _classify_bash(cmd: str) -> str:
     """Single source of truth for read-only bash classification.
 
@@ -1490,6 +1617,17 @@ def _classify_bash(cmd: str) -> str:
     """
     if not cmd.strip():
         return "empty command"
+    # Both run on the RAW command, before any splitting: a comment elides to the
+    # end of the LINE regardless of the `&&` / `;` boundaries the regex split
+    # below believes in, so `git status && git branch injected # --list` has to
+    # be handled here rather than per-segment. Everything downstream then reads
+    # the words bash will actually run.
+    cmd = _strip_shell_comments(cmd)
+    if not cmd.strip():
+        return "empty command"
+    elided = _elided_shell_construct(cmd)
+    if elided:
+        return f"unsafe shell pattern: {elided}"
     # Strip discard-only redirects (output sinks / stderr-merge) before the
     # unsafe-shell check; they are read-only but contain '>' / '&'.
     scrubbed = _DEVNULL_REDIR_RE.sub(" ", cmd)
