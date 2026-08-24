@@ -1,12 +1,13 @@
 /**
  * Script fallback faces must lead every font stack, and must never claim Latin.
  *
- * zh-CN, ja, ko, hi and bn have no font coverage otherwise: every family in
- * `--font-body` and `--mono` covers Latin only, so those scripts fall through to the
- * browser's per-script fallback, which picks a face per character and silently
- * mismatches. CJK punctuation is the visible symptom — Unicode uses one code point
- * for the Chinese and Japanese comma and full stop, so only the font decides where
- * in the em box the glyph sits.
+ * hi and bn need aliases in every stack because the configured families cover
+ * Latin only. CJK is different: its regional aliases are activated only by an
+ * explicit zh/ja/ko language scope. Untagged CJK falls through to the browser's
+ * locale-aware system cascade rather than being forced through one region's Han
+ * face. CJK punctuation is the visible symptom when that distinction is lost —
+ * Unicode uses one code point for the Chinese and Japanese comma and full stop,
+ * so only the font decides where in the em box the glyph sits.
  *
  * The mechanism is eight `unicode-range`-restricted `@font-face` aliases over
  * locally installed faces, placed at the FRONT of each stack. Three properties
@@ -47,33 +48,23 @@ import { describe, it, expect } from 'vitest'
 const SRC = join(__dirname, '..')
 const INDEX_CSS = readFileSync(join(SRC, 'index.css'), 'utf8')
 
-/** Region-specific Han aliases must never share an active token. */
-const SC_ALIASES = [
-  'KC Han Fallback',
-  'KC Han Mono Fallback',
-] as const
-
 /**
- * Locale-specific aliases, keyed by the `html:lang()` rule that activates them.
- *
- * `KC Han Fallback` draws Simplified glyph forms and no Hangul at all, so leaving
- * it in front for `lang=ja` or `lang=ko` puts an alias that cannot serve the locale
- * ahead of one that can — which is why each entry REPLACES the default pair rather
- * than prepending to it.
+ * Locale-specific aliases, keyed by the document or content `lang` selector
+ * that activates them. Untagged CJK content deliberately receives none of
+ * these aliases, so the user agent can use its locale-aware system cascade
+ * instead of the application assuming one Han region.
  */
 const REGIONAL = [
+  { lang: 'zh', body: 'KC Han Fallback', mono: 'KC Han Mono Fallback' },
   { lang: 'ja', body: 'KC Japanese Fallback', mono: 'KC Japanese Mono Fallback' },
   { lang: 'ko', body: 'KC Korean Fallback', mono: 'KC Korean Mono Fallback' },
 ] as const
 
 const REGIONAL_ALIASES = REGIONAL.flatMap(r => [r.body, r.mono])
 
-/**
- * A code point only this locale's aliases must cover. Kana for Japanese, Hangul
- * for Korean — the scripts that are absent from the other's faces, so a swapped
- * or merged token fails here rather than rendering from the OS cascade.
- */
+/** Representative code points each locale's aliases must cover. */
 const SCRIPT_PROBES: Record<string, ReadonlyArray<readonly [string, number]>> = {
+  zh: [['CJK unified ideographs', 0x4e00]],
   ja: [['hiragana', 0x3042], ['katakana', 0x30a2]],
   ko: [['Hangul syllables', 0xac00], ['Hangul compatibility jamo', 0x3131]],
 }
@@ -84,7 +75,7 @@ const COMMON_ALIASES = [
   'KC Bengali Fallback',
 ] as const
 
-const ALIASES = [...SC_ALIASES, ...REGIONAL_ALIASES, ...COMMON_ALIASES] as const
+const ALIASES = [...REGIONAL_ALIASES, ...COMMON_ALIASES] as const
 
 /**
  * Ranges that must stay OUT of every alias. Latin proper plus general punctuation:
@@ -282,7 +273,7 @@ describe('script fallback faces', () => {
     expect(root).toMatch(/--script-fallbacks-mono:/)
   })
 
-  it('keeps the Simplified Chinese aliases as the default token', () => {
+  it('keeps regional CJK aliases out of the default token', () => {
     const rootBlock = ruleBody(/:root\s*\{([^}]*)\}/)
     expect(rootBlock, 'no :root block found in index.css').not.toBe('')
 
@@ -290,16 +281,17 @@ describe('script fallback faces', () => {
     const rootMono = scriptToken(rootBlock, true)
     expectCommon('root body', root)
     expectCommon('root mono', rootMono)
-    expectAliasPair('root', root, rootMono, ...SC_ALIASES)
     for (const family of REGIONAL_ALIASES) {
       expect(root, `${family} leaked into the default body token`).not.toContain(family)
       expect(rootMono, `${family} leaked into the default mono token`).not.toContain(family)
     }
   })
 
-  it.each(REGIONAL)('swaps to isolated aliases for html:lang($lang)', ({ lang, body, mono }) => {
-    const block = ruleBody(new RegExp(`html:lang\\(${lang}\\)\\s*\\{([^}]*)\\}`))
-    expect(block, `no html:lang(${lang}) block found in index.css`).not.toBe('')
+  it.each(REGIONAL)('swaps to isolated aliases for document and content lang=$lang', ({ lang, body, mono }) => {
+    const block = ruleBody(new RegExp(
+      `html:lang\\(${lang}\\)\\s*,\\s*\\[lang\\|="${lang}"\\]\\s*\\{([^}]*)\\}`,
+    ))
+    expect(block, `no document + content selector for lang=${lang} found in index.css`).not.toBe('')
 
     const bodyToken = scriptToken(block)
     const monoToken = scriptToken(block, true)
@@ -308,9 +300,9 @@ describe('script fallback faces', () => {
     expectAliasPair(lang, bodyToken, monoToken, body, mono)
 
     // Every alias that is not this locale's own must be ABSENT, not merely later:
-    // a retained Simplified face would sit in front of the one face that can draw
-    // this locale's script, and the browser's lang-aware fallback is never reached.
-    const foreign = [...SC_ALIASES, ...REGIONAL_ALIASES].filter(f => f !== body && f !== mono)
+    // a retained foreign regional face could claim shared Han code points before
+    // the browser's lang-aware fallback is reached.
+    const foreign = REGIONAL_ALIASES.filter(f => f !== body && f !== mono)
     for (const family of foreign) {
       expect(bodyToken, `${family} leaked into the ${lang} body token`).not.toContain(family)
       expect(monoToken, `${family} leaked into the ${lang} mono token`).not.toContain(family)

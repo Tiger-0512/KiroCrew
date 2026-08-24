@@ -3,18 +3,20 @@
 @tailwind utilities;
 
 /* ── Script fallback faces ──
-   zh-CN, ja, ko, hi and bn have no font coverage otherwise: every family in --font-body
-   and --mono below covers Latin only, so those scripts fall through to the
-   browser's per-script fallback, which picks a face per character and silently
-   mismatches. CJK punctuation makes it visible — Unicode uses one code point for
-   the Chinese and Japanese comma and full stop, so only the FONT decides where in
-   the em box the glyph sits.
+   hi and bn have no font coverage otherwise: every family in --font-body and
+   --mono below covers Latin only. CJK is different: its regional aliases are
+   activated only by an explicit zh/ja/ko language scope. Untagged CJK
+   deliberately falls through to the browser's locale-aware system cascade
+   instead of being forced through one region's Han face. CJK punctuation makes
+   that distinction visible — Unicode uses one code point for the Chinese and
+   Japanese comma and full stop, so only the FONT decides where in the em box the
+   glyph sits.
 
    Each alias below is a `unicode-range`-restricted @font-face over locally
    installed faces. That restriction is the whole point: a face whose range
-   excludes Latin is never consulted for Latin, so the alias can sit FIRST in a
-   family list without changing how Latin renders. Ordering therefore stops
-   mattering — this works regardless of what follows, including the terminal
+   excludes Latin is never consulted for Latin, so an alias can sit FIRST in the
+   active language scope without changing how Latin renders. Ordering therefore
+   stops mattering — this works regardless of what follows, including the terminal
    `sans-serif`/`monospace` generic, which is what a plain appended tail could not
    guarantee (on macOS `-apple-system` resolves Han from the OS cascade before any
    appended family is reached).
@@ -57,9 +59,9 @@
                  U+FE30-FE4F, U+FF00-FFEF;
 }
 /* Japanese and Simplified Chinese share Han code points but not always glyph
-   forms. A separate alias lets html:lang(ja) select Japanese faces without
-   changing the SC default used by zh-CN. Kana joins the Han ranges so Japanese
-   punctuation and syllabaries come from the same face. */
+   forms. A separate alias lets an explicit lang=ja scope select Japanese faces
+   without changing the SC alias selected by lang=zh. Kana joins the Han ranges
+   so Japanese punctuation and syllabaries come from the same face. */
 @font-face {
   font-family: 'KC Japanese Fallback';
   font-style: normal; font-weight: 400;
@@ -89,11 +91,11 @@
 }
 /* Korean needs its own alias for a different reason than Japanese does: Hangul
    (U+AC00-D7AF and the Jamo blocks) is absent from the SC and JP faces' coverage
-   in practice, so leaving zh-CN's alias in front for html:lang(ko) puts an alias
-   that cannot draw Hangul ahead of one that can, and the browser resolves each
-   syllable from the OS cascade instead. The Han ranges are claimed too — Korean
-   copy is Hangul-only, but a quoted 한자 in user content should draw the Korean
-   glyph form, not the Simplified one. */
+   in practice. If the SC alias were retained when lang=ko becomes active, it
+   would put a face that cannot draw Hangul ahead of one that can, and the browser
+   would resolve each syllable from the OS cascade instead. The Han ranges are
+   claimed too — Korean copy is Hangul-only, but a quoted 한자 in user content
+   should draw the Korean glyph form, not the Simplified one. */
 @font-face {
   font-family: 'KC Korean Fallback';
   font-style: normal; font-weight: 400;
@@ -266,8 +268,8 @@
      repeating the list. Locale-specific overrides below swap regional Han faces
      without changing any consumer stack. They lead each stack; unicode-range is
      what makes leading safe. */
-  --script-fallbacks:'KC Han Fallback','KC Devanagari Fallback','KC Bengali Fallback';
-  --script-fallbacks-mono:'KC Han Mono Fallback','KC Han Fallback','KC Devanagari Fallback','KC Bengali Fallback';
+  --script-fallbacks:'KC Devanagari Fallback','KC Bengali Fallback';
+  --script-fallbacks-mono:'KC Devanagari Fallback','KC Bengali Fallback';
   /* An installed theme pack fills --theme-font-sans / --theme-font-mono with its
      own faces (see hooks/themeCss.ts). Reading them here means code surfaces
      follow a pack's monospace face without the user having to switch the whole UI
@@ -278,13 +280,22 @@
   --mono:var(--theme-font-mono, var(--script-fallbacks-mono),'JetBrains Mono',ui-monospace,SFMono-Regular,monospace);
   --radius-sm:6px;--radius-md:8px;--radius-lg:12px;--radius-xl:16px;
 }
-html:lang(ja) {
+html:lang(zh),
+[lang|="zh"] {
+  /* Regional Han aliases are opt-in: untagged content falls through to the
+     browser's locale-aware system cascade instead of assuming Simplified Chinese. */
+  --script-fallbacks:'KC Han Fallback','KC Devanagari Fallback','KC Bengali Fallback';
+  --script-fallbacks-mono:'KC Han Mono Fallback','KC Han Fallback','KC Devanagari Fallback','KC Bengali Fallback';
+}
+html:lang(ja),
+[lang|="ja"] {
   /* Never retain the SC aliases here. If no named Japanese face is installed,
      falling through lets the browser use its lang-aware Japanese fallback. */
   --script-fallbacks:'KC Japanese Fallback','KC Devanagari Fallback','KC Bengali Fallback';
   --script-fallbacks-mono:'KC Japanese Mono Fallback','KC Japanese Fallback','KC Devanagari Fallback','KC Bengali Fallback';
 }
-html:lang(ko) {
+html:lang(ko),
+[lang|="ko"] {
   /* Never retain the SC or JP aliases here. Neither draws Hangul, so leaving one
      in front only delays resolution to the browser's lang-aware Korean fallback. */
   --script-fallbacks:'KC Korean Fallback','KC Devanagari Fallback','KC Bengali Fallback';
