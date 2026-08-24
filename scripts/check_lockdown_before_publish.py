@@ -181,13 +181,12 @@ SUPPRESS_RE = re.compile(r"#\s*lockdown-ok\s*:\s*(?P<reason>\S.*)$")
 #: one, so an allowlist entry would quietly widen into a whole-function waiver.
 KNOWN_UNCONVERTED: dict[str, tuple[str, str]] = {
     # Classified by #5346 -- the sites #5307's third acceptance criterion left
-    # untriaged. The two snapshot ones are a shutil.copy2 into a final
-    # destination, so they need copy-to-temp + restrict + replace rather than a
+    # untriaged. The remaining snapshot one is a shutil.copy2 into a final
+    # destination, so it needs copy-to-temp + restrict + replace rather than a
     # one-line atomic_write swap.
     #
     # #5285's six sites were here until main converted them mid-review; the
     # shrink-only rule below is what forced this list to follow.
-    "src/kiro_crew/snapshot.py::_backup_and_copy": ("#5346", "mc / f"),
     "src/kiro_crew/snapshot.py::_do_merge": ("#5346", "d"),
     "src/kiro_crew/sel.py::_append_lines_locked": ("#5346", "self._path"),
     # Surfaced once _mode_of learned the symbolic spelling: writes a config that

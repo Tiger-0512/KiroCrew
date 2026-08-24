@@ -608,11 +608,21 @@ test("readExternallyManaged: degenerate markers (oversized, symlink, directory) 
   // device must not be able to stall this startup-path read.
   const sym = fs.mkdtempSync(path.join(os.tmpdir(), "kc-ext-"));
   t.after(() => fs.rmSync(sym, { recursive: true, force: true }));
-  fs.symlinkSync(path.join(sym, "nowhere"), path.join(sym, "EXTERNALLY-MANAGED"));
-  assert.deepStrictEqual(readExternallyManaged({ env: {}, resourcesPath: sym }), {
-    managedBy: "",
-    updateCommand: "",
-  });
+  try {
+    fs.symlinkSync(path.join(sym, "nowhere"), path.join(sym, "EXTERNALLY-MANAGED"));
+    assert.deepStrictEqual(readExternallyManaged({ env: {}, resourcesPath: sym }), {
+      managedBy: "",
+      updateCommand: "",
+    });
+  } catch (err) {
+    // Ordinary Windows accounts may lack SeCreateSymbolicLinkPrivilege. Keep
+    // the oversized and directory cases live, and omit only the setup this
+    // host cannot perform; capable Windows hosts still exercise the assertion.
+    if (process.platform !== "win32" || !["EPERM", "EACCES"].includes(err?.code)) {
+      throw err;
+    }
+    t.diagnostic("symlink assertion omitted: host cannot create symlinks");
+  }
   // Directory named like the marker: present = managed, nothing to parse.
   const dirCase = fs.mkdtempSync(path.join(os.tmpdir(), "kc-ext-"));
   t.after(() => fs.rmSync(dirCase, { recursive: true, force: true }));

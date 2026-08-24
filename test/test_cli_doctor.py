@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import requires_symlinks
 from kiro_crew import cli_doctor
 
 
@@ -1434,6 +1435,7 @@ class TestEffectiveModelSection:
 
         assert "\x1b" not in capsys.readouterr().out
 
+    @requires_symlinks
     def test_a_symlink_to_a_sensitive_target_is_refused(self, monkeypatch, capsys) -> None:
         """The doctor read goes through agent_discovery's hardened reader, which
         refuses a symlink whose RESOLVED target is sensitive (the documented
