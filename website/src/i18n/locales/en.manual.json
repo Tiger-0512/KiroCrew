@@ -2090,6 +2090,10 @@
       "command_completions": "Command completions"
     },
     "terminalKeyBar": {
+      "paste": "Paste",
+      "paste_clipboard_empty": "Clipboard is empty",
+      "paste_failed": "Paste failed",
+      "paste_permission_needed": "Allow clipboard access",
       "terminal_keys": "Terminal keys"
     },
     "themeEditor": {

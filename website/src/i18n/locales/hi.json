@@ -6540,6 +6540,10 @@
       "use_this_folder": "इस फ़ोल्डर का इस्तेमाल करें"
     },
     "terminalKeyBar": {
+      "paste": "चिपकाएँ",
+      "paste_clipboard_empty": "क्लिपबोर्ड खाली है",
+      "paste_failed": "चिपकाना विफल रहा",
+      "paste_permission_needed": "क्लिपबोर्ड एक्सेस की अनुमति दें",
       "terminal_keys": "टर्मिनल की कुंजियाँ"
     },
     "themeEditor": {

@@ -6540,6 +6540,10 @@
       "use_this_folder": "এই ফোল্ডার ব্যবহার করো"
     },
     "terminalKeyBar": {
+      "paste": "পেস্ট করুন",
+      "paste_clipboard_empty": "ক্লিপবোর্ড খালি",
+      "paste_failed": "পেস্ট ব্যর্থ হয়েছে",
+      "paste_permission_needed": "ক্লিপবোর্ড অ্যাক্সেসের অনুমতি দিন",
       "terminal_keys": "টার্মিনালের কী"
     },
     "themeEditor": {

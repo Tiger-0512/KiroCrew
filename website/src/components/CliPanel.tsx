@@ -449,7 +449,7 @@ function TerminalView({ sessionId, cwd, visible, onSendToChat }: { sessionId: st
       {/* Below the terminal in flow, never over it: the shell prompt occupies the
           bottom row, so an overlay would hide the line being typed. The terminal
           shrinks by the bar's height and the ResizeObserver above refits it. */}
-      {touchDevice && <TerminalKeyBar term={term} />}
+      {touchDevice && <TerminalKeyBar term={term} active={visible} />}
       {sel && (
         // Positioning-only container; the interactive affordances are the
         // native <button>s inside. The mouse handlers merely guard event

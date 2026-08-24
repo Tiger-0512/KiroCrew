@@ -6540,6 +6540,10 @@
       "use_this_folder": "diesen Ordner verwenden"
     },
     "terminalKeyBar": {
+      "paste": "Einfügen",
+      "paste_clipboard_empty": "Zwischenablage ist leer",
+      "paste_failed": "Einfügen fehlgeschlagen",
+      "paste_permission_needed": "Zugriff auf die Zwischenablage erlauben",
       "terminal_keys": "Terminal-Tasten"
     },
     "themeEditor": {

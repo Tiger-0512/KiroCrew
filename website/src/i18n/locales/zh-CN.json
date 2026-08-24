@@ -6450,6 +6450,10 @@
       "use_this_folder": "使用此文件夹"
     },
     "terminalKeyBar": {
+      "paste": "粘贴",
+      "paste_clipboard_empty": "剪贴板为空",
+      "paste_failed": "粘贴失败",
+      "paste_permission_needed": "请允许访问剪贴板",
       "terminal_keys": "终端按键"
     },
     "themeEditor": {

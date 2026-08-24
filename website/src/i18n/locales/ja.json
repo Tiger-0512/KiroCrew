@@ -6450,6 +6450,10 @@
       "use_this_folder": "このフォルダーを使用"
     },
     "terminalKeyBar": {
+      "paste": "貼り付け",
+      "paste_clipboard_empty": "クリップボードが空です",
+      "paste_failed": "貼り付けに失敗しました",
+      "paste_permission_needed": "クリップボードへのアクセスを許可してください",
       "terminal_keys": "ターミナルキー"
     },
     "themeEditor": {

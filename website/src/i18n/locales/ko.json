@@ -6450,6 +6450,10 @@
       "use_this_folder": "이 폴더 사용"
     },
     "terminalKeyBar": {
+      "paste": "붙여넣기",
+      "paste_clipboard_empty": "클립보드가 비어 있습니다",
+      "paste_failed": "붙여넣기 실패",
+      "paste_permission_needed": "클립보드 접근을 허용하세요",
       "terminal_keys": "터미널 키"
     },
     "themeEditor": {

@@ -6630,6 +6630,10 @@
       "use_this_folder": "utiliser ce dossier"
     },
     "terminalKeyBar": {
+      "paste": "Coller",
+      "paste_clipboard_empty": "Le presse-papiers est vide",
+      "paste_failed": "Échec du collage",
+      "paste_permission_needed": "Autorisez l’accès au presse-papiers",
       "terminal_keys": "Touches du terminal"
     },
     "themeEditor": {
