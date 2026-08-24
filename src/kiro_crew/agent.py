@@ -1297,7 +1297,14 @@ def _sel_hook_rejected(event: str, command: str, reason: str) -> None:
                 source="cli",
                 operation="kiro_hooks_rejected",
                 outcome="rejected",
-                resources=redact(f"event={event} command={command[:200]}"),
+                # redact-then-truncate on the interpolated value, through the
+                # same context-aware shim as the outer call: slicing ``command``
+                # raw could cut a credential at the boundary, and slicing after
+                # baseline-only redaction would still cut a companion-only token
+                # before the companion regexes see it. Context redaction runs
+                # over the FULL command first, so no redactor ever sees a
+                # boundary-cut fragment.
+                resources=redact(f"event={event} command={redact(command)[:200]}"),
                 error=reason,
             )
         )

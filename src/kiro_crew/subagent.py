@@ -79,7 +79,11 @@ from kiro_crew.providers.base import (
     LLMEvent,
 )
 from kiro_crew.resource_status import cached_admission_check
-from kiro_crew.security import redact_credentials, redact_exfiltration_urls
+from kiro_crew.security import (
+    redact_and_truncate,
+    redact_credentials,
+    redact_exfiltration_urls,
+)
 from kiro_crew.sel import sel
 from kiro_crew.session import SessionManager
 from kiro_crew.session_surface import has_dashboard_surface
@@ -291,6 +295,16 @@ def _redact(text: str) -> str:
     text, _ = redact_exfiltration_urls(text)
     text, _ = redact_credentials(text)
     return text
+
+
+def _redact_and_truncate(text: str, max_chars: int) -> str:
+    """Redact over the FULL text, then truncate (never ``_redact(x[:n])``).
+
+    Truncating first can cut a credential in half at the boundary, leaving a
+    fragment the redaction regexes no longer match — the raw remainder would
+    then leak into the surface this feeds. Delegates to the canonical helper.
+    """
+    return redact_and_truncate(text, max_chars)
 
 
 # Bounds for a rendered exception chain. The rendering reaches a WS frame, a
@@ -3018,7 +3032,7 @@ class SubagentManager:
         return [
             {
                 "id": a.id,
-                "task": _redact(a.task[:80]),
+                "task": _redact_and_truncate(a.task, 80),
                 "agent": _redact(a.agent),
                 "parent": a.parent_session_key,
                 "rss_mb": round(a.last_rss_gb * 1024, 1),
