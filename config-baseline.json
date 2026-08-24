@@ -5404,7 +5404,8 @@
           "enabled": false,
           "trust_identity": false,
           "allowed_logins": [],
-          "pin_scope": "node"
+          "pin_scope": "node",
+          "keep_awake": true
         },
         "restore_sessions": false,
         "restore_window_minutes": 30,
@@ -5484,7 +5485,8 @@
         "enabled": false,
         "trust_identity": false,
         "allowed_logins": [],
-        "pin_scope": "node"
+        "pin_scope": "node",
+        "keep_awake": true
       }
     },
     {
@@ -5556,6 +5558,20 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": "node"
+    },
+    {
+      "path": "dashboard.tailscale.keep_awake",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Keep Awake While Published",
+      "help": "Keep this machine's SYSTEM awake while the dashboard is published on the tailnet, so a phone does not lose the dashboard when the laptop idles. The display is still allowed to sleep. Publishing is the opt-in — this exists to opt back OUT of the awake half without unpublishing. Independent of dashboard.prevent_sleep, which keeps the host awake only while a turn is in flight.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": true
     },
     {
       "path": "dashboard.restore_sessions",

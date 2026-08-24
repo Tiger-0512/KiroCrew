@@ -2674,6 +2674,18 @@ class TailscaleConfig:
             "effect on the next gateway start.",
         ),
     )
+    keep_awake: bool = field(
+        default=True,
+        metadata=_meta(
+            "Keep Awake While Published",
+            "Keep this machine's SYSTEM awake while the dashboard is published "
+            "on the tailnet, so a phone does not lose the dashboard when the "
+            "laptop idles. The display is still allowed to sleep. Publishing is "
+            "the opt-in — this exists to opt back OUT of the awake half without "
+            "unpublishing. Independent of dashboard.prevent_sleep, which keeps "
+            "the host awake only while a turn is in flight.",
+        ),
+    )
 
 
 def _tailscale_config_from(raw: object) -> TailscaleConfig:
@@ -2717,6 +2729,7 @@ def _tailscale_config_from(raw: object) -> TailscaleConfig:
         trust_identity=trust_identity,
         allowed_logins=allowed_logins,
         pin_scope=pin_scope,
+        keep_awake=_safe_bool(data.get("keep_awake"), True),
     )
 
 

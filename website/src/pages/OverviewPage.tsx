@@ -7,6 +7,7 @@ import { useUptime } from '../hooks/useUptime'
 import { api } from '../api/client'
 import { Card, CardTitle, StatCard } from '../components/ui'
 import { TunnelStatus } from '../components/TunnelStatus'
+import { TailnetMobileCard } from '../components/TailnetMobileCard'
 import ErrorBoundary from '../components/ErrorBoundary'
 import { getOverviewStatCards } from './overviewStatCards'
 import { getOverviewPanel } from './overviewPanel'
@@ -220,6 +221,16 @@ export default function OverviewPage() {
           )
         })}
       </div>
+
+      {/* Mobile access. Above the summary cards and full width, because it is a
+          guided sequence rather than a metric: it owns the one next action, and
+          in its terminal state it renders a QR the operator scans off the screen.
+          Isolated so a throwing card cannot take the Overview down with it. */}
+      <ErrorBoundary scope="overview-tailnet-mobile" fallback={null}>
+        <div className="mb-6">
+          <TailnetMobileCard />
+        </div>
+      </ErrorBoundary>
 
       {/* Deep-surface summary cards */}
       <div className="grid gap-3.5 grid-cols-2 max-[760px]:grid-cols-1">

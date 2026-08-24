@@ -818,6 +818,97 @@ export interface TailnetStatusData {
   state: 'pinned' | 'off' | 'unresolved' | 'active'
 }
 
+/** The single next action for tailnet mobile access.
+ *
+ * Ordered by what blocks what, and derived SERVER-side (see
+ * `handlers/tailnet_mobile._derive_step`) so this list is rendered, never
+ * re-computed here — one owner for the state machine.
+ *
+ * - `pinned` — an administrator's policy forbids tailnet access. Dead end.
+ * - `install` / `start_daemon` / `sign_in` / `enable_magicdns` — the four ways
+ *   there is no usable tailnet name, kept apart because each is a different
+ *   errand for the operator.
+ * - `trust_off` — a name exists but the gateway will not accept it as an origin
+ *   yet, so publishing would yield a reachable dashboard answering 403.
+ * - `restart_gateway` — configured and resolvable NOW, but this server resolved
+ *   nothing at startup (it booted before tailscaled). Genuinely not trusted
+ *   until a restart, so it must not render as ready.
+ * - `occupied` — serve holds the mount for something that is not this dashboard,
+ *   or its state is undeterminable; publishing would REPLACE it.
+ * - `publish` — everything in place, one action left.
+ * - `ready` — published and trusted.
+ */
+export type TailnetMobileStep =
+  | 'pinned'
+  | 'install'
+  | 'start_daemon'
+  | 'sign_in'
+  | 'enable_magicdns'
+  | 'trust_off'
+  | 'restart_gateway'
+  | 'occupied'
+  | 'publish'
+  | 'ready'
+
+/** Live readiness for tailnet mobile access (`GET /api/tailnet/mobile`).
+ *
+ * Unlike `TailnetStatusData` this IS a live daemon probe: it answers "what can
+ * this machine do next", where the other answers "what does the running server
+ * already trust". Both are needed and they are not interchangeable. */
+export interface TailnetMobileData {
+  step: TailnetMobileStep
+  /** MagicDNS name as resolved right now; `''` when unresolvable. */
+  host: string
+  origin: string
+  installed: boolean
+  reachable: boolean
+  logged_in: boolean
+  /** Other devices on this tailnet. `0` means there is nothing to reach this
+   *  dashboard FROM — publishing and the QR both still succeed, so this is the
+   *  only signal that the scan is going to fail. */
+  peer_count: number
+  /** How many of those are online right now. */
+  peers_online: number
+  /** `dashboard.tailscale.enabled` — the origin-trust config switch. */
+  trusted: boolean
+  /** Whether the RUNNING server resolved a name at startup. */
+  startup_trusted: boolean
+  /** `null` when serve state could not be determined — never render as false. */
+  published: boolean | null
+  keep_awake: boolean
+  governance_pinned: boolean
+  /** Verbatim daemon/serve text. Shown as-is; never rephrased client-side. */
+  detail: string
+  download_url: string
+  qr_ttl_secs: number
+  serve_port: number
+  dashboard_port: number
+}
+
+/** Result of a publish/unpublish attempt. `detail` carries the daemon's own
+ *  words, which is the only part guaranteed to stay correct if Tailscale
+ *  rewords its errors. */
+export interface TailnetMobileMutation {
+  ok: boolean
+  code: string
+  detail: string
+}
+
+/** A minted mobile-access QR. Carries a LIVE session token in both fields, so
+ *  it is fetched only on explicit user action and never cached. */
+export interface TailnetMobileQr {
+  /** `https://<host>/?token=<token>` — treat as a credential. */
+  url: string
+  /** PNG data URI, rendered server-side (no client QR library). */
+  image: string
+  /** Lifetime of the session the link opens. */
+  ttl_secs: number
+  /** Window in which the LINK must be opened — much shorter than `ttl_secs`,
+   *  and the part that surprises people. */
+  link_window_secs: number
+  host: string
+}
+
 /**
  * GET /api/security/trusted-apps — per-app grants that let a third-party app
  * run its own code (Python in-process, its own backend, manifest shell
@@ -1787,6 +1878,17 @@ export const api = {
   // setting IS a config value and the status endpoint only reports what the
   // running server resolved from it at startup.
   tailnetStatus: () => get('/api/tailnet/status').then(j) as Promise<TailnetStatusData>,
+  // Mobile access. `tailnetMobile` is a LIVE probe (two daemon round trips
+  // server-side), so poll it gently; the three mutations below are user-driven.
+  tailnetMobile: () => get('/api/tailnet/mobile').then(j) as Promise<TailnetMobileData>,
+  tailnetMobilePublish: () =>
+    post('/api/tailnet/mobile/publish', {}).then(j) as Promise<TailnetMobileMutation>,
+  tailnetMobileUnpublish: () =>
+    post('/api/tailnet/mobile/unpublish', {}).then(j) as Promise<TailnetMobileMutation>,
+  // Mints a session token. Called ONLY from an explicit user action — never on
+  // render — because the response is a live credential.
+  tailnetMobileQr: (ttl?: string) =>
+    post('/api/tailnet/mobile/qr', ttl ? { ttl } : {}).then(j) as Promise<TailnetMobileQr>,
   // Denied commands (Settings → Security). Every endpoint returns the full
   // refreshed snapshot so callers can seed their query cache from the response.
   deniedCommands: () => get('/api/security/denied-commands').then(j) as Promise<DeniedCommandsData>,
