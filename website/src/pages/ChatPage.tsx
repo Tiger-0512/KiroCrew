@@ -67,13 +67,17 @@ import { useScrollManager } from './chat/useScrollManager'
 import { shouldPaginateOlder } from './chat/pagination'
 import EarlierMessagesBar from './chat/EarlierMessagesBar'
 import { useVirtualChat } from '../hooks/virtualizer/useVirtualChat'
-import { parseFiles, prepareSendPayload, resolveFileSegment, buildFileLabels, buildRelMap, findUnreferencedAttachments, parseDirTokens, serializeDirTokens, parseDirs, resolveDirSegment, spliceDirTokens } from '../utils/fileTokens'
+import { parseFiles, prepareSendPayload, resolveFileSegment, buildFileLabels, buildRelMap, findUnreferencedAttachments, parseDirTokens, serializeDirTokens, parseDirs, resolveDirSegment, spliceDirTokens, restoreQueuedContent } from '../utils/fileTokens'
 import { classifyDrop } from '../utils/dropClassify'
 import { makeRelative } from '../components/FilePickerMenu'
 import { type PasteBlock, expandAll as expandPasteTokens, findTokenRanges, pruneBlocks as pruneBlocksUtil, remapCarriedBlocks, saveStoredPaste, recollapsePastes } from '../utils/pasteTokens'
 import { extractPromptFromToken, extractSlackContextFromToken } from '../utils/tokenPrompt'
 /** Delay (ms) before scrolling to bottom after a state update, giving React time to commit. */
 const SCROLL_AFTER_RENDER_MS = 100
+/** Bound on stashed pre-send composer states for queued sends (see
+ *  queuedSendStash). A queue rarely holds more than a handful of entries;
+ *  oldest-first eviction keeps a long session from accumulating stale keys. */
+const MAX_QUEUED_SEND_STASH = 8
 // No arbitrary cap on pinned-jump page loads: the loop terminates when the
 // target message is found OR history is exhausted (!slotHasMore / null result).
 // The `cancelled` flag in the useEffect cleanup and the loadOlderMessages null
@@ -1724,6 +1728,17 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // get an entry (they have no token), so their remove stays state-only. A
   // ref, not state: it never drives rendering. Entries die with their chip.
   const pickedFileTokens = useRef<Record<string, string>>({})
+  /** Pre-serialization composer state of sends the server QUEUED, keyed by the
+   *  exact queued content (the POSTed LLM-facing text — what queue_push echoes
+   *  back as the card's content). handleCancelQueued restores from this stash
+   *  losslessly for every path shape; the restoreQueuedContent parser is the
+   *  fallback for what a same-tab stash cannot cover (reload, another tab, a
+   *  queue entry edited after send). Same pattern as SideChat's submittedRaw,
+   *  and bounded the same way: oldest-first eviction, insertion order is Map
+   *  order. Sends carrying paste blocks are not stashed — their collapsed
+   *  tokens would restore as dead literals — so those fall through to the
+   *  parser, which keeps the expanded text. */
+  const queuedSendStash = useRef<Map<string, { raw: string; files: string[] }>>(new Map())
   const [snipFrame, setSnipFrame] = useState<HTMLCanvasElement | null>(null)
   // The slot that INITIATED the current snip. getDisplayMedia + cropping is
   // async and the user may switch slots meanwhile, so the cropped image must
@@ -4000,6 +4015,10 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // this shape since long before this feature, and changing it here would widen
     // the PR into pre-existing attachment behaviour.
     const sentSessionRefs = optionText ? [] : pendingSessionsRef.current.slice()
+    // Snapshot the staged files BEFORE the optimistic clear below: if the
+    // server answers `queued`, this send's pre-serialization composer state
+    // is stashed so a cancel can restore it losslessly (see queuedSendStash).
+    const stagedFilesAtSend = [...new Set(pendingFilesRef.current)]
     const { txt: typedTxt, displayTxt: typedDisplayTxt, filePaths } = prepareSendPayload(raw, pendingFilesRef.current)
     // Folder references serialize like files but from the text alone: each
     // `@rel/` token becomes `[attached_dir N] /abs/path` in the LLM-facing
@@ -4335,6 +4354,20 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       const r = await api.sendChat(llmTxt, slot ?? undefined, colorThemeRef.current, controller.signal, metaPayload, steerNow)
       clearTimeout(timeout)
       const body = await r.json().catch(() => ({}))
+      if (body.queued && !activePastes.length) {
+        // The server queued this send: the card's content will be exactly
+        // `llmTxt` (queue_push echoes the POSTed text), so key the pre-send
+        // composer state by it for a lossless cancel restore. Paste-carrying
+        // sends are skipped — `raw` holds collapsed paste tokens whose blocks
+        // were cleared above, and restoring dead `[ Paste #N ]` literals is
+        // worse than the parser fallback keeping the expanded text.
+        queuedSendStash.current.set(llmTxt, { raw, files: stagedFilesAtSend })
+        while (queuedSendStash.current.size > MAX_QUEUED_SEND_STASH) {
+          const oldest = queuedSendStash.current.keys().next().value
+          if (oldest === undefined) break
+          queuedSendStash.current.delete(oldest)
+        }
+      }
       if (!body.queued && !body.ok) {
         dispatch(setSlotRunning(false))
         dispatch(appendMessage({ role: 'error', content: body.error || i18nT('pages.chatPage.send_failed'), cls: '' }))
@@ -5708,7 +5741,26 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const handleCancelQueued = useCallback((queueId: string) => {
     if (!activeSlot) return
     const msg = messagesRef.current.find(m => m.role === 'queued' && (m.meta?.queueId as string) === queueId)
-    if (msg?.content) setInput(msg.content)
+    if (msg?.content) {
+      // The queued card holds the LLM-facing serialization prepareSendPayload
+      // produced, not the typed text, and the queued row carries no meta.files.
+      // Prefer the pre-send composer state THIS tab stashed when the server
+      // queued the send — lossless for every path shape. Fall back to the
+      // strict parser (provably-lossless claims only) for what a same-tab
+      // stash cannot cover: a reload, another tab, or an entry edited after
+      // send (an edit changes the content key, so a stale stash cannot match).
+      // Both halves MERGE into the composer, mirroring the failed-send restore
+      // ("MERGE, never overwrite"): text appends to any draft typed while the
+      // message sat queued, and paths join the staged chips — so a re-send
+      // serializes from the chips exactly once.
+      const stashed = queuedSendStash.current.get(msg.content)
+      if (stashed) queuedSendStash.current.delete(msg.content)
+      const { text, files } = stashed
+        ? { text: stashed.raw, files: stashed.files }
+        : restoreQueuedContent(msg.content)
+      setInput(mergeIntoDraft(inputRef.current, text))
+      if (files.length) setPendingFiles(prev => [...new Set([...prev, ...files])])
+    }
     // Optimistically remove the card; WS event is a no-op if already gone
     dispatch(cancelQueuedMessage({ slot: activeSlot, queue_id: queueId }))
     api.cancelQueuedMessage(activeSlot, queueId).catch(() => {})

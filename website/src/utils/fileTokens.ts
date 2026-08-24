@@ -325,6 +325,99 @@ export function prepareSendPayload(raw: string, pendingFiles: string[]): SendPay
   }
 }
 
+/** Producer-form image markdown line: `![image](dest)` alone on its line,
+ *  where `dest` is exactly what mdImageDest emits — the conservative
+ *  passthrough-safe subset, or the `<…>`-wrapped escaped form. Anchored to
+ *  whole lines so an image the user wove into a sentence is left alone. */
+const IMG_LINE_RE = /^!\[image\]\(((?:<(?:\\.|[^\\>])*>)|[\w/.@:~-]+)\)$/gm
+
+/** A path shape the send path could actually have serialized: absolute POSIX
+ *  (which also covers the producer's forward-slashed UNC form) or a Windows
+ *  drive-letter path. Upload and picker paths are absolute, so a marker whose
+ *  path is relative cannot be producer output — it is foreign text (a pasted
+ *  transcript, a knowledge block) and must be left verbatim. */
+const RESTORABLE_PATH_RE = /^(?:[/\\]|[A-Za-z]:[/\\])/
+
+/** Composer state recovered from a queued message's serialized content. */
+export interface RestoredComposerState {
+  /** The typed text, with provably-lossless attachment markers stripped. */
+  text: string
+  /** Attachment paths (images included) to re-stage into pendingFiles. */
+  files: string[]
+}
+
+/**
+ * FALLBACK inverse of prepareSendPayload's attachment serialization, for
+ * restoring a cancelled queued message into the composer.
+ *
+ * The PRIMARY restore path is ChatPage's send-side stash: `send()` records
+ * the pre-serialization composer state ({typed text, staged files}) keyed by
+ * the exact queued content, and `handleCancelQueued` restores from it
+ * losslessly for every path shape. This parser covers the cases the stash
+ * cannot — a reload, another tab, or a queue entry edited after send — and
+ * its contract is strict: claim ONLY what is provably lossless, leave
+ * everything else verbatim (never worse than the verbatim restore the base
+ * behavior was).
+ *
+ * Provably lossless claims, and nothing more:
+ *  - An own-line `![image](dest)` whose recovered path is an absolute image
+ *    path. mdImageDest's `<…>` wrap makes the destination boundary exact,
+ *    spaces included; relative paths (a pasted README's
+ *    `![image](docs/logo.png)`) are not producer output and stay verbatim.
+ *  - An own-line `[attached_file N] <token>` whose remainder is a single
+ *    whitespace-free token, with N ≥ 1 (the producer indexes from 1) and N
+ *    unclaimed (the producer emits each index once) and the path absolute.
+ *    Both possible readings — whole-line path vs path-plus-prose — are
+ *    identical for this shape, so stripping the line and re-staging the path
+ *    cannot corrupt either. The line vanishes; the path re-stages.
+ *
+ * Deliberately left VERBATIM, because their path boundary is not provable
+ * from the wire text alone (any whitespace-bounded capture can truncate a
+ * spaced path, staging a nonexistent file and re-sending the wrong one):
+ *  - embedded (@-mention) markers sitting inline in prose;
+ *  - own-line markers whose remainder contains whitespace — equally a spaced
+ *    bare-upload path and a line-start mention followed by prose;
+ *  - `[attached_dir N]` markers (always inline in prose);
+ *  - marker-shaped text with relative paths, N ≤ 0, or duplicate N.
+ * Claims are held in a list, never an N-indexed array, so malformed marker
+ * text cannot build a sparse structure that throws mid-cancel and breaks
+ * cancel entirely. Expanded paste blocks, knowledge blocks, and session-ref
+ * links also stay in the text — their collapsed forms lived in drafts that
+ * were cleared on send.
+ *
+ * Lossless inversion of EVERY shape needs attachment metadata on queue
+ * entries — a backend schema change tracked in #5594 — after which this
+ * parser can retire to legacy-entry duty.
+ */
+export function restoreQueuedContent(content: string): RestoredComposerState {
+  const files: string[] = []
+  let text = content.replace(IMG_LINE_RE, (line, dest: string) => {
+    const path = mdImageDestToPath(dest)
+    if (!IMG_EXT.test(path) || !RESTORABLE_PATH_RE.test(path)) return line
+    files.push(path)
+    return ''
+  })
+
+  const claims: Array<{ path: string; matched: string }> = []
+  const claimedN = new Set<number>()
+  for (const m of text.matchAll(/^\[attached_file (\d+)\][^\S\n]+(\S+)[ \t]*$/gm)) {
+    const n = parseInt(m[1], 10)
+    if (n < 1 || claimedN.has(n) || !RESTORABLE_PATH_RE.test(m[2]) || IMG_EXT.test(m[2])) continue
+    claimedN.add(n)
+    claims.push({ path: m[2], matched: m[0] })
+  }
+  for (const c of claims) {
+    const esc = c.matched.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    text = text.replace(new RegExp(`^${esc}(?:\\n|$)`, 'm'), '')
+    files.push(c.path)
+  }
+
+  // Strip only the blank lines the removed image/marker lines left behind —
+  // whitespace the user typed on their own first/last line is theirs to keep.
+  text = text.replace(/^(?:[ \t]*\n)+/, '').replace(/(?:\n[ \t]*)+$/, '')
+  return { text, files: [...new Set(files)] }
+}
+
 /* ------------------------------------------------------------------------- */
 /* Folder references                                                          */
 /* ------------------------------------------------------------------------- */

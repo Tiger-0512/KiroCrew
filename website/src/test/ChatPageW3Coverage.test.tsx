@@ -31,6 +31,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Provider } from 'react-redux'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { createTestStore } from './helpers'
+import { prepareSendPayload } from '../utils/fileTokens'
 import { ThemeProvider } from '../hooks/useTheme'
 import { i18nT } from '../i18n/t'
 import { store as appStore } from '../store'
@@ -116,6 +117,8 @@ vi.mock('../pages/chat/SidePanel', () => ({
 interface InputProps {
   value: string
   onChange: (v: string) => void
+  onSend: () => void
+  onFileSelect?: (path: string, kind?: string, token?: string) => void
   onScreenshot?: () => void
   pendingFiles?: string[]
   uploading?: boolean
@@ -549,6 +552,59 @@ describe('ChatPage — queued message actions', () => {
     expect(apiMocks.cancelQueuedMessage).toHaveBeenCalledWith('chat-1', 'q1')
     // Optimistically removed rather than waiting for the WS echo.
     await waitFor(() => expect(queueProps!.messages.map(m => m.meta?.queueId)).toEqual(['q2']))
+  })
+
+  it('cancelling a queued send restores the typed text and chips losslessly from the stash', async () => {
+    // The queued card holds the LLM-facing serialization, not the typed text.
+    // When THIS tab made the send, cancel restores the stashed pre-send
+    // composer state — lossless even for a spaced path no parser could
+    // reconstruct from the wire text.
+    const spaced = '/Users/me/Desktop/My Report.pdf'
+    const { store } = renderChatPage([msg('user', 'first', { ts: '2026-08-12T07:00:00Z' })], { queue: [] })
+    await waitFor(() => expect(inputProps).not.toBeNull())
+    apiSpy('sendChat').mockResolvedValue({ json: async () => ({ queued: true }) })
+    act(() => { inputProps!.onFileSelect!(spaced) })
+    act(() => { inputProps!.onChange('summarize this for me') })
+    await waitFor(() => expect(inputProps!.value).toBe('summarize this for me'))
+    const serialized = prepareSendPayload('summarize this for me', [spaced]).txt
+    await act(async () => { inputProps!.onSend() })
+    await waitFor(() => expect(apiMocks.sendChat).toHaveBeenCalled())
+    // The queue_push echo carries the POSTed text as the card content.
+    act(() => {
+      store.dispatch({ type: 'chat/appendQueuedMessage', payload: { slot: 'chat-1', content: serialized, ts: 'q-ts', queueId: 'q1' } })
+    })
+    await waitFor(() => expect(queueProps?.messages?.length).toBe(1))
+    act(() => { queueProps!.onCancel('q1') })
+    await waitFor(() => expect(inputProps!.value).toBe('summarize this for me'))
+    expect(inputProps!.value).not.toContain('[attached_file')
+    await waitFor(() => expect(inputProps!.pendingFiles).toEqual([spaced]))
+    expect(apiMocks.cancelQueuedMessage).toHaveBeenCalledWith('chat-1', 'q1')
+  })
+
+  it('cancelling a foreign queued card falls back to the strict parser', async () => {
+    // No stash entry exists for a card this tab did not send (reload, another
+    // tab). The parser claims only provably-lossless shapes: the own-line
+    // upload marker is stripped and re-staged; nothing else is guessed at.
+    const serialized = prepareSendPayload('summarize the report', ['/tmp/report.docx']).txt
+    expect(serialized).toContain('[attached_file 1] /tmp/report.docx')
+    await renderWithQueue([{ id: 'q1', content: serialized }, { id: 'q2', content: 'then deploy' }])
+    act(() => { queueProps!.onCancel('q1') })
+    await waitFor(() => expect(inputProps!.value).toBe('summarize the report'))
+    expect(inputProps!.value).not.toContain('[attached_file')
+    await waitFor(() => expect(inputProps!.pendingFiles).toEqual(['/tmp/report.docx']))
+    expect(apiMocks.cancelQueuedMessage).toHaveBeenCalledWith('chat-1', 'q1')
+  })
+
+  it('cancelling merges the restored text into a live draft instead of clobbering it', async () => {
+    // A user mid-draft who cancels a queued card must not lose what they were
+    // typing — the same MERGE-never-overwrite rule the failed-send restore
+    // follows for exactly this race.
+    await renderWithQueue()
+    act(() => { inputProps!.onChange('half-typed new thought') })
+    await waitFor(() => expect(inputProps!.value).toBe('half-typed new thought'))
+    act(() => { queueProps!.onCancel('q1') })
+    await waitFor(() => expect(inputProps!.value).toContain('run the tests'))
+    expect(inputProps!.value).toContain('half-typed new thought')
   })
 
   it('interrupting a queued card asks the server to interrupt that entry only', async () => {
