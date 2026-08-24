@@ -6,6 +6,7 @@ logic, so a regression in the shard parser or percentile math fails the test.
 """
 
 import json
+import math
 from pathlib import Path
 
 from kiro_crew.dashboard.handlers.telemetry import _aggregate, _Hist, _pct_from_buckets
@@ -389,6 +390,153 @@ def test_aggregate_rejects_non_finite_scalars(tmp_path: Path):
     # inf value skipped; inf timestamp coerces the point to ts=0 (sorts
     # oldest), so ts=9 wins.
     assert rows[0]["latest"] == 97.0
+
+
+def test_aggregate_rejects_non_finite_histogram_fields(tmp_path: Path):
+    """Histogram mirror of the scalar guard: one poisoned data point degrades
+    that point, never the endpoint.
+
+    Python's json module parses Infinity/NaN literals, so before the fix a
+    poisoned histogram point flowed straight through ``_Hist.add``'s bare
+    float()/int() coercions: an inf sum/min/bound reached json.dumps and
+    emitted an ``Infinity`` literal (which browser JSON.parse rejects), and
+    an inf count/bucket_count/timestamp raised uncaught OverflowError."""
+    poisoned_sum = _hist_dp({}, ns=2)
+    poisoned_sum["sum"] = float("inf")
+    poisoned_min = _hist_dp({}, ns=3)
+    poisoned_min["min"] = float("nan")
+    poisoned_bound = _hist_dp({}, ns=4)
+    poisoned_bound["explicit_bounds"] = [10, float("inf"), 30, 40, 50]
+    poisoned_count = _hist_dp({}, ns=5)
+    poisoned_count["count"] = float("inf")
+    poisoned_bucket = _hist_dp({}, ns=6)
+    poisoned_bucket["bucket_counts"][1] = float("nan")
+    poisoned_ts = _hist_dp({}, count=3, ns=7)
+    poisoned_ts["time_unix_nano"] = float("inf")
+    # json accepts arbitrary-precision ints: float(10**400) raises
+    # OverflowError, a third path past a naive isfinite check.
+    oversized_count = _hist_dp({}, ns=9)
+    oversized_count["count"] = 10**400
+    # A truthy non-list container raises TypeError at iteration, not inside
+    # the element coercion.
+    scalar_bounds = _hist_dp({}, ns=10)
+    scalar_bounds["explicit_bounds"] = 5
+    scalar_buckets = _hist_dp({}, ns=11)
+    scalar_buckets["bucket_counts"] = True
+    good = _hist_dp({}, count=2, ns=8, each_ms=25.0)
+
+    metric = {
+        "name": "kirocrew.mcp.backend.acquire.duration",
+        "data": {
+            "data_points": [
+                poisoned_sum,
+                poisoned_min,
+                poisoned_bound,
+                poisoned_count,
+                poisoned_bucket,
+                poisoned_ts,
+                oversized_count,
+                scalar_bounds,
+                scalar_buckets,
+                good,
+            ]
+        },
+    }
+    result = _aggregate([_write_shard(tmp_path, [metric])])
+    row = next(o for o in result["other"] if o["name"] == "kirocrew.mcp.backend.acquire.duration")
+
+    # Structurally poisoned points (sum/bound/count/bucket) are skipped whole;
+    # the nan-min point survives with min degraded; the inf-timestamp point
+    # survives sorting oldest. 1 (poisoned_min) + 3 (poisoned_ts) + 2 (good).
+    assert row["count"] == 6
+    assert row["other_generations"] == 0
+    # The emitted payload must serialize to strict JSON — no Infinity/NaN
+    # literal anywhere (this is what the browser's JSON.parse enforces).
+    json.dumps(result, allow_nan=False)
+
+
+def test_hist_add_validates_the_whole_point_before_mutation():
+    """The _Hist.add invariant: nothing invalid ever enters group state.
+
+    Three residual classes past the plain non-finite guard:
+    - EXACTNESS: integer counts must not roundtrip through float
+      (int(float(2**53 + 1)) silently rounds and corrupts emitted counts).
+    - ACCUMULATION: two individually finite 1e308 sums overflow the
+      accumulator to inf, which json.dumps emits as an Infinity literal.
+    - STRUCTURE: bucket_counts shorter/longer than len(bounds)+1 poisons the
+      group's buckets and crashes percentile interpolation with IndexError.
+    """
+    big = 2**53 + 1  # not representable as float; float roundtrip rounds it
+    h = _Hist()
+    exact = _hist_dp({}, ns=1)
+    exact["count"] = big
+    exact["bucket_counts"] = [0, big, 0, 0, 0, 0]
+    h.add(exact)
+    assert h.count == big, "integer count must be preserved exactly"
+    assert h.buckets[1] == big
+
+    # Prospective accumulated-sum guard: the second point is skipped whole.
+    h2 = _Hist()
+    a = _hist_dp({}, ns=1)
+    a["sum"] = 1e308
+    b = _hist_dp({}, ns=2)
+    b["sum"] = 1e308
+    h2.add(a)
+    h2.add(b)
+    g = h2._groups[tuple(float(x) for x in _BOUNDS)]
+    assert math.isfinite(g["sum"])
+    assert h2.count == 1, "the overflowing point is skipped whole"
+
+    # Structural guard: bucket_counts must have exactly len(bounds)+1 entries.
+    h3 = _Hist()
+    short = _hist_dp({}, ns=1)
+    short["explicit_bounds"] = [10]
+    short["bucket_counts"] = [0, 0, 1]  # needs exactly 2 for one bound
+    h3.add(short)
+    assert h3.count == 0, "mismatched bucket/bounds shape is skipped whole"
+    # Integer-field strictness: oversized, boolean, negative, and fractional
+    # counts are rejected whole, never clamped, coerced, or truncated.
+    for bad_count in (2**64, True, -1, 2.5):
+        p = _hist_dp({}, ns=1)
+        p["count"] = bad_count
+        h3.add(p)
+    assert h3.count == 0
+    # A FALSY non-list container (false/0/"") is garbage, not "absent" —
+    # only a genuinely missing or null key defaults to empty.
+    for bad_container in (False, 0, ""):
+        p = _hist_dp({}, ns=1)
+        p["bucket_counts"] = bad_container
+        h3.add(p)
+    assert h3.count == 0
+    none_ok = _hist_dp({}, ns=1)
+    none_ok["explicit_bounds"] = None  # null key = absent, point stays legal
+    none_ok["bucket_counts"] = None
+    h3.add(none_ok)
+    assert h3.count == 1
+
+    # Falsy garbage never substitutes a default: "" as sum must skip the
+    # point, not silently record 0.0 and skew the mean.
+    h4 = _Hist()
+    bad_sum = _hist_dp({}, ns=1)
+    bad_sum["sum"] = ""
+    h4.add(bad_sum)
+    assert h4.count == 0
+    # protobuf JSON encodes uint64 as strings: parse exactly, no float round.
+    quoted = _hist_dp({}, ns=1)
+    quoted["count"] = str(big)
+    quoted["bucket_counts"] = [0, big, 0, 0, 0, 0]
+    h4.add(quoted)
+    assert h4.count == big, "quoted integer count must be preserved exactly"
+
+    # Derived arithmetic must stay finite: individually finite bounds whose
+    # adjacent span overflows (hi - lo = inf) would poison percentile
+    # interpolation with an Infinity literal.
+    h5 = _Hist()
+    wide = _hist_dp({}, ns=1)
+    wide["explicit_bounds"] = [-1e308, 1e308]
+    wide["bucket_counts"] = [0, 1, 0]
+    h5.add(wide)
+    assert h5.count == 0, "non-finite interpolation span is skipped whole"
 
 
 def test_aggregate_gauges_keep_latest_not_sum(tmp_path: Path):
