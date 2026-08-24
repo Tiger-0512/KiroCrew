@@ -60,6 +60,25 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
+def _without_authorship_claim(kwargs: "dict[str, Any]") -> "dict[str, Any]":
+    """Drop any operator-authorship claim an app tried to pass.
+
+    ``update_job`` forwards ``**kwargs`` verbatim, unlike ``add_job``, whose explicit
+    keyword signature has always made this impossible. An app is never the operator, so
+    the key is removed rather than validated -- there is no value of it an app may send.
+
+    Belt to the service's braces: ``CronService`` derives the flag from the job's own
+    ownership and refuses the claim anyway. This keeps it from travelling at all, so a
+    caller that reads the kwargs before the service does cannot see one.
+    """
+    if "operator_authored" not in kwargs:
+        return kwargs
+    trimmed = dict(kwargs)
+    trimmed.pop("operator_authored", None)
+    logger.warning("App attempted to set operator_authored on a cron update; ignored")
+    return trimmed
+
+
 class CronSyncOnLoopError(RuntimeError):
     """Raised when a synchronous ``CronSDK`` mutator is called on a running
     event loop, where it could only complete by parking that loop.
@@ -397,6 +416,7 @@ class CronSDK:
         Returns the updated CronJob or None.
         """
         self._assert_owned(job_id, "cron_update_job")
+        kwargs = _without_authorship_claim(kwargs)
         result = _run_sync_mutator(
             self._cron.update_job, job_id, _api="update_job", **kwargs
         )
@@ -407,6 +427,7 @@ class CronSDK:
         """Event-loop-native :meth:`update_job` (routes through
         ``CronService.update_job_async``)."""
         self._assert_owned(job_id, "cron_update_job")
+        kwargs = _without_authorship_claim(kwargs)
         result = await self._cron.update_job_async(job_id, **kwargs)
         self._audit_update(job_id)
         return result

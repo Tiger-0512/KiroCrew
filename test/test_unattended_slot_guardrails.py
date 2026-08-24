@@ -77,9 +77,9 @@ class TestUnattendedApprovalWindow:
         from kiro_crew.dashboard import chat_runner
 
         src = inspect.getsource(chat_runner._run_chat)
-        assert "state.approval_timeout_for(slot)" in src, (
-            "the runner's approval await must take its window from DashboardState"
-        )
+        assert (
+            "state.approval_timeout_for(slot)" in src
+        ), "the runner's approval await must take its window from DashboardState"
         assert "timeout=_approval_window" in src
         assert "timeout=7200.0" not in src, "the hardcoded 2h window is back"
 
@@ -106,9 +106,9 @@ class TestUnattendedApprovalWindow:
         writes = [ln for ln in src.splitlines() if "_human_seen = True" in ln]
         assert len(writes) == 1, "attendance must be recorded in exactly one place"
         gate = src.index("request_app = request.get")
-        assert src.index("_human_seen = True") > gate, (
-            "attendance must be recorded only after the app-ownership gate"
-        )
+        assert (
+            src.index("_human_seen = True") > gate
+        ), "attendance must be recorded only after the app-ownership gate"
 
     def test_trust_is_not_the_detector(self, tmp_path) -> None:
         """Why ``_app`` and not ``_trust``: trust is False wherever this is read.
@@ -415,10 +415,18 @@ class _Loop:
         self.slot_key = slot_key
         self.active = active
         self.message = "check CI"
+        # Read by the gateway fire sites: whether the loop's message is the
+        # operator's, which gates `{{name}}` expansion.
+        self.operator_authored = False
         self.idle_secs = 300
         self.max_cycles = 24
         self.cycle_count = 3
         self.stop_sentinel_path = ""
+        # The armed crew. Read by the dashboard fire path, which renders the nudge
+        # body with this crew's variables and passes the loop's own instruction as
+        # the skill-trigger source. A double missing it raises AttributeError
+        # rather than failing an assertion, so it reads as an unrelated crash.
+        self.agent = ""
 
 
 def _bg_slot(key: str) -> MagicMock:
@@ -492,9 +500,7 @@ class TestIdleCleanupSparesArmedLoops:
         )
 
         async with TestClient(TestServer(_make_app(state))) as client:
-            resp = await client.post(
-                "/api/chat/slots/cleanup", json={"max_inactive_days": 3}
-            )
+            resp = await client.post("/api/chat/slots/cleanup", json={"max_inactive_days": 3})
             data = await resp.json()
 
         assert data["keys"] == ["worker-2"], "cleanup archived a slot owning an armed loop"
@@ -515,9 +521,9 @@ class TestIdleCleanupSparesArmedLoops:
             patch("kiro_crew.dashboard.chat._run_chat", new=AsyncMock()),
         ):
             assert await orch._fire_dashboard_nudge(_Loop("worker-1")) is True
-        assert rehydrate.await_args.kwargs.get("adopt_closed") is True, (
-            "the nudge fire path must reach a session that idle cleanup closed"
-        )
+        assert (
+            rehydrate.await_args.kwargs.get("adopt_closed") is True
+        ), "the nudge fire path must reach a session that idle cleanup closed"
 
     @pytest.mark.asyncio
     async def test_an_inactive_loop_does_not_pin_a_dead_slot_forever(
@@ -537,9 +543,7 @@ class TestIdleCleanupSparesArmedLoops:
         )
 
         async with TestClient(TestServer(_make_app(state))) as client:
-            resp = await client.post(
-                "/api/chat/slots/cleanup", json={"max_inactive_days": 3}
-            )
+            resp = await client.post("/api/chat/slots/cleanup", json={"max_inactive_days": 3})
             data = await resp.json()
 
         assert data["keys"] == ["worker-1"]
@@ -560,9 +564,7 @@ class TestIdleCleanupSparesArmedLoops:
         monkeypatch.setattr("kiro_crew.autonudge.get_instance", _boom)
 
         async with TestClient(TestServer(_make_app(state))) as client:
-            resp = await client.post(
-                "/api/chat/slots/cleanup", json={"max_inactive_days": 3}
-            )
+            resp = await client.post("/api/chat/slots/cleanup", json={"max_inactive_days": 3})
             data = await resp.json()
 
         assert data["archived"] == 0
@@ -571,7 +573,7 @@ class TestIdleCleanupSparesArmedLoops:
 
     @pytest.mark.asyncio
     async def test_the_users_close_still_retires_the_loop(self, tmp_path, monkeypatch) -> None:
-        """"Respect the close" survives adopt_closed=True.
+        """ "Respect the close" survives adopt_closed=True.
 
         The rule used to be an emergent property of the fire path's rehydrate
         miss. Now that the fire path adopts a closed session, the ✕ handler has
@@ -731,17 +733,16 @@ class TestIdleCleanupSparesArmedLoops:
                 return super().pop(key, *a)
 
         state._slots = _WatchedSlots(state._slots)
-        monkeypatch.setattr(
-            "kiro_crew.dashboard.chat_handlers._retire_slot_nudge_loop", _retire
-        )
+        monkeypatch.setattr("kiro_crew.dashboard.chat_handlers._retire_slot_nudge_loop", _retire)
         monkeypatch.setattr("kiro_crew.autonudge.get_instance", lambda: None)
         async with TestClient(TestServer(_make_app(state))) as client:
             resp = await client.delete("/api/chat/slots/crew-c_1a2b3c4d")
             assert resp.status == 200
 
-        assert order[:2] == ["retire", "pop"], (
-            f"the slot left the registry before its loop was retired: {order}"
-        )
+        assert order[:2] == [
+            "retire",
+            "pop",
+        ], f"the slot left the registry before its loop was retired: {order}"
 
 
 # ── A SCOPED grant is never cached as a session approval policy ───────────────
@@ -857,7 +858,9 @@ class TestScopedGrantIsNeverPersisted:
         state = _crew_state()
         with patch.object(type(safety_override()), "is_scope_active", return_value=True):
             assert chat_runner._slot_is_trusted(slot) is True
-            assert chat_runner._native_crew_should_auto_approve({"s1": {"done": False}}, state, slot)
+            assert chat_runner._native_crew_should_auto_approve(
+                {"s1": {"done": False}}, state, slot
+            )
 
         src = inspect.getsource(chat_runner._run_chat)
         assert "slot_trusted = _slot_is_trusted(slot)" in src

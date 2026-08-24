@@ -733,6 +733,10 @@ class TelegramDispatcher:
             # X-Session-Key; one shared writer lives in messaging.identity.
             await publish_turn_identity(self.sessions, session_key)
             # Off-loop: build_message embeds the episodic query (blocking urllib).
+            # Crew variables are NOT expanded on inbound channel text: a value is
+            # operator configuration and this text comes from a channel participant,
+            # so expanding it would let anyone allowed to message the bot read that
+            # config by typing {{NAME}}.
             full_message, _ = await run_in_embed_pool(
                 self.ctx_builder.build_message,
                 text,

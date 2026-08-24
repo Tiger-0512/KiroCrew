@@ -4991,6 +4991,49 @@ _CREW_SECRET_LEAVES: list[str] = [
     # handler is the only writer and it opens the path directly, not through this
     # gate, so the operator's Settings toggle still works.
     "computer_use.json",
+    # The user-defined ``{{name}}`` variable store. Not a secret — values are
+    # declared non-secret and the panel says so — but every value is expanded into
+    # OPERATOR-AUTHORED text: the agent system prompt, a cron ``message``, a
+    # monitor instruction, the dashboard composer. An agent that could write this
+    # file would be choosing text that later arrives as instructions in its own
+    # prompt on the next turn, and in every scheduled turn after that. Prompt
+    # injection with persistence, which is a different and worse thing than reading
+    # a value.
+    #
+    # A DIRECTORY entry, not a leaf for the JSON file, and the distinction is the
+    # whole point: the store is never written alone. ``update_config_locked`` places a
+    # predictable ``<path>.lock`` sidecar and ``write_config_atomically`` stages a temp
+    # inode in the same directory before renaming, so fencing only the target leaves an
+    # agent able to write the staging inode or the lock while the operator saves.
+    # Classifying the directory covers target, lock and temp files together — the same
+    # reason ``.vault`` above is a directory entry.
+    #
+    # This exposure is PRE-EXISTING and not created by moving the data here:
+    # variables previously lived in ``config.json``, which the shell gate does not
+    # protect either (measured: ``is_sensitive_bash_command("echo x > …/config.json")``
+    # returns None, and ``is_sensitive_path`` is False — the same fact the
+    # ``computer_use.json`` comment above records). The difference is that a dedicated
+    # directory CAN be fenced, whereas ``config.json`` cannot: a dozen dashboard
+    # handlers write it on ordinary settings changes, so listing it would break them.
+    # Giving variables their own location is what makes this fixable.
+    #
+    # ``PUT /api/variables`` is the only writer and it opens the path directly rather
+    # than through this gate, so the Settings panel keeps working — the same pattern
+    # every entry above relies on.
+    "variables",
+    # The two records that PERSIST an operator-authorship decision. Everything the
+    # in-process code does to derive that flag honestly -- deriving it from the request,
+    # refusing an app's claim, re-stamping it when the message changes -- is undone if
+    # the agent can simply write `"operator_authored": true` into the file and wait for
+    # a reload. Measured: a direct edit of the cron record survives `_load()` and the
+    # dispatcher then expands fenced variables into text the agent wrote.
+    #
+    # So the flag's integrity depends on these files being fenced, exactly as the
+    # variable store's does. Fencing them costs nothing real: every legitimate reader
+    # and writer is the gateway process itself, which opens them directly rather than
+    # through this gate -- the same pattern each entry above relies on.
+    "cron.json",
+    "autonudge.json",
     # Browser Mode's durable ENABLE gate. Same class of control as
     # ``computer_use.json`` directly above: while it is present the browse proxy
     # is registered and the ``browser_*`` tools are in the agent's tool list,

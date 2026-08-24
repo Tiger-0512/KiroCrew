@@ -192,6 +192,9 @@ async def authorize_and_update_nudge(
         loop = await svc.update(
             loop_id,
             message=message,
+            # Same derivation as arming: only the operator's own dashboard form is
+            # operator-authored, and an update that rewrites the body re-stamps it.
+            operator_authored=(source == "dashboard"),
             idle_secs=idle_secs,
             max_cycles=max_cycles,
             active=active,
@@ -204,6 +207,38 @@ async def authorize_and_update_nudge(
         return _deny("loop not found", 404)
     _audit("success", session_key=loop.slot_key)
     return loop, None, 200
+
+
+def _armed_crew_for(state: NudgeAuthzState, slot_key: str) -> str:
+    """The crew a monitor loop armed at *slot_key* should resolve variables against.
+
+    Two lookups, because the two caller shapes keep the crew in different places. A
+    dashboard slot carries it on the slot object. A channel binding key (``slack:``,
+    ``discord:``) has no slot at all, so its crew lives only on the SESSION -- and
+    consulting ``_slots`` alone left every channel-bound loop resolving the DEFAULT
+    crew's variables. That failure is silent by construction: ``resolve_variables``
+    falls back to the default crew rather than raising, so the loop runs and simply
+    substitutes another crew's values.
+
+    An empty answer from both is not a failure -- it is a genuinely unbound loop, and
+    the empty string means "resolve the default crew" downstream. The session lookup is
+    best-effort for the same reason: a crew name is an optimisation over that fallback,
+    never a precondition for arming, so a session store that cannot answer must not
+    take the loop down with it.
+    """
+    slot = (getattr(state, "_slots", None) or {}).get(slot_key)
+    if slot is not None:
+        armed = getattr(slot, "agent", "") or ""
+        if armed:
+            return armed
+    sessions = getattr(state, "sessions", None)
+    if sessions is None:
+        return ""
+    try:
+        return sessions.get_agent(slot_key) or ""
+    except Exception:  # noqa: BLE001 - a crew name is best-effort, never fatal
+        logger.debug("autonudge: session crew lookup failed", exc_info=True)
+        return ""
 
 
 async def authorize_and_add_nudge(
@@ -376,6 +411,9 @@ async def authorize_and_add_nudge(
     except Exception:  # noqa: BLE001 - fail closed: no audit ⇒ no loop
         logger.error("autonudge arm denied: SEL audit unavailable", exc_info=True)
         return None, "audit log unavailable — nudge loop not armed", 503
+    # Record the crew this loop is armed under so its nudge bodies resolve that
+    # crew's variables rather than the default crew's.
+    armed_agent = _armed_crew_for(state, slot_key)
     try:
         loop = await svc.add(
             slot_key=slot_key,
@@ -384,6 +422,12 @@ async def authorize_and_add_nudge(
             max_cycles=int(max_cycles),
             stop_sentinel_path=stop_sentinel_path,
             max_runtime_secs=int(max_runtime_secs),
+            agent=armed_agent,
+            # Derived from `source`, which this chokepoint already carries and audits,
+            # rather than a second discriminator that could disagree with it. Only the
+            # operator's own dashboard form is operator-authored; `workflow`,
+            # `mcp-directive` and `app:*` are all reached by the agent.
+            operator_authored=(source == "dashboard"),
         )
     except Exception as exc:  # noqa: BLE001 - audit the failure, then propagate
         _audit("error", f"svc.add failed: {type(exc).__name__}")
@@ -402,6 +446,7 @@ async def authorize_and_add_nudge(
             },
         )
     except Exception:  # noqa: BLE001 - armed loop already covered by ``invoked``
-        logger.warning("autonudge success audit failed (invoked event covers the arm)",
-                       exc_info=True)
+        logger.warning(
+            "autonudge success audit failed (invoked event covers the arm)", exc_info=True
+        )
     return loop, None, 200

@@ -75,6 +75,7 @@ from kiro_crew.dashboard.chat_utils import (
     _remove_queued_by_id,
     _sync_dashboard_slots,
     effective_session_key,
+    request_is_operator,
     slot_history_key,
 )
 from kiro_crew.dashboard.state import (
@@ -603,8 +604,18 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     # FIX 2: an unattended app-owned turn runs under the background concurrency
     # cap; run_background_turn passes an attended slot straight through, so the
     # interactive path is unchanged (no semaphore is even created).
+    # operator_authored: TRUE only for the dashboard composer, whose text the operator
+    # typed themselves. This handler also serves APP tokens (`request_app`, App Kit
+    # §5.2), and an app is automation like the MCP and workflow callers — its message
+    # is not the operator's, so expanding it would hand an app the value of any
+    # variable it names. Derived from the same `request_app` the ownership check above
+    # already uses, rather than a second notion of who is calling.
     task = spawn_guarded_turn(
-        state, slot, state.run_background_turn(slot, _run_chat(state, slot, message))
+        state,
+        slot,
+        state.run_background_turn(
+            slot, _run_chat(state, slot, message, operator_authored=request_is_operator(request))
+        ),
     )
     slot.task = task
     slot._recovery_retrigger_count = 0
@@ -2505,9 +2516,7 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
     if denied is not None:
         return denied
     force = request.query.get("force", "").lower() == "true"
-    return web.json_response(
-        await stop_slot_turn(state, slot, force=force, cancel_key=cancel_key)
-    )
+    return web.json_response(await stop_slot_turn(state, slot, force=force, cancel_key=cancel_key))
 
 
 async def api_chat_slot_continue(request: web.Request) -> web.Response:

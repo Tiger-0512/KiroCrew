@@ -69,7 +69,21 @@ export const CHUNK_BUDGETS = {
   // The app-core chunk: the dashboard shell plus everything eagerly imported
   // from it. The vendor split in vite.config.ts already extracts the heaviest
   // libraries; what remains is first-party code with no clean lazy boundary.
-  App: 3120 * KB, // measured 2969 KB
+  //
+  // Raised from 3120 KB for the Environment Variables settings panel, which is a
+  // new eagerly-imported first-party surface -- the same class as every other
+  // panel on that page. A lazy boundary for one panel among ~20 eager siblings
+  // would put a suspense flash on a single Settings tab, so the growth is
+  // irreducible without changing how that page loads, which is not this change's
+  // business.
+  //
+  // The previous annotation read "measured 2969 KB" while the chunk had reached
+  // 3120.2 KB: 151 KB of growth from other work, unannotated, which is why the
+  // headroom was gone before anything here touched it. The margin is genuinely
+  // thin -- CI measured 164 B OVER this ceiling while a local build of the same
+  // commit came in 597 B under -- so the number below carries real headroom
+  // rather than tracking the measurement.
+  App: 3136 * KB, // measured 3120.2 KB in CI, 3119.4 KB locally
 
   // Markdown/math/syntax rendering stack (katex, highlight.js, remark/rehype)
   // -- one deliberate `manualChunks` bucket, see vite.config.ts.

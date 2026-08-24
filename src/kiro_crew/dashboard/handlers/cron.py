@@ -18,6 +18,7 @@ from kiro_crew import model_registry
 from kiro_crew.config.loader import config_dir
 from kiro_crew.cron import CronStoreBusy, is_valid_timezone
 from kiro_crew.cron_script import resolve_script_path
+from kiro_crew.dashboard.chat_utils import request_is_operator
 from kiro_crew.dashboard.cron_inject import (
     hydrate_slot_from_history,
     inject_cron_result_to_dashboard,
@@ -123,9 +124,7 @@ async def _resolve_contradictions(
     """
     to_delete: list[str] = []
     for candidate in candidates:
-        prompt = _CONTRADICTION_PROMPT.format(
-            old_rule=candidate["rule"], new_rule=new_rule
-        )
+        prompt = _CONTRADICTION_PROMPT.format(old_rule=candidate["rule"], new_rule=new_rule)
         try:
             verdict = await _classify_contradiction(state, prompt)
         except Exception:
@@ -134,7 +133,9 @@ async def _resolve_contradictions(
         if verdict == "CONTRADICTORY":
             logger.info(
                 "Contradiction: new %r supersedes %r (sim=%.2f)",
-                new_rule[:60], candidate["rule"][:60], candidate["similarity"],
+                new_rule[:60],
+                candidate["rule"][:60],
+                candidate["similarity"],
             )
             to_delete.append(candidate["key"])
     return to_delete
@@ -169,8 +170,11 @@ async def _resolve_and_supersede(
             # call itself raises (audit-service blip) we skip the delete for this
             # key rather than deleting unaudited.
             _sel().log_api_access(
-                caller=sk, operation="lesson.contradiction_superseded",
-                outcome="allowed", source="dashboard", resources=key,
+                caller=sk,
+                operation="lesson.contradiction_superseded",
+                outcome="allowed",
+                source="dashboard",
+                resources=key,
             )
             # delete_semantic is a sync FAISS op; off-load so this background
             # sweep doesn't block concurrent dashboard/Slack requests on the loop.
@@ -265,6 +269,11 @@ async def api_crons_create(request: web.Request) -> web.Response:
     # the data-loss race: two concurrent creates could interleave at the
     # `await`, and the unlocked save could overwrite the other request's job.
     add_kwargs: dict[str, Any] = {
+        # Derived, never asserted: this route serves APP tokens as well as the
+        # operator's own cron form, and an app is automation like the MCP caller. The
+        # earlier comment here claimed "THIS route is the operator's form" and was
+        # simply wrong about its own traffic.
+        "operator_authored": request_is_operator(request),
         "channel": channel,
         "agent_id": (agent_id or ""),
         "model": model_val,
@@ -287,9 +296,7 @@ async def api_crons_create(request: web.Request) -> web.Response:
             return web.json_response(_CRON_BUSY_BODY, status=_CRON_BUSY_STATUS)
     elif cron_expr:
         try:
-            job = await state.crons.add_job_async(
-                name, message, cron_expr=cron_expr, **add_kwargs
-            )
+            job = await state.crons.add_job_async(name, message, cron_expr=cron_expr, **add_kwargs)
         except CronStoreBusy:
             return web.json_response(_CRON_BUSY_BODY, status=_CRON_BUSY_STATUS)
     else:
@@ -361,9 +368,7 @@ async def api_cron_batch_delete(request: web.Request) -> web.Response:
     # De-duplicate while preserving order (a select-all + click race can send dupes).
     unique_ids = list(dict.fromkeys(ids))
     if len(unique_ids) > _MAX_BATCH_DELETE:
-        return web.json_response(
-            {"error": f"too many ids (max {_MAX_BATCH_DELETE})"}, status=400
-        )
+        return web.json_response({"error": f"too many ids (max {_MAX_BATCH_DELETE})"}, status=400)
     deleted: list[str] = []
     failed: list[str] = []
     try:
@@ -390,7 +395,8 @@ async def api_cron_batch_delete(request: web.Request) -> web.Response:
         except Exception:
             logger.warning(
                 "History cleanup failed for cron %s (job already removed)",
-                job_id, exc_info=True,
+                job_id,
+                exc_info=True,
             )
     # SEL audit: a destructive batch action must record who/what/when + the
     # affected resources and outcome. Cron IDs are non-sensitive (no
@@ -438,26 +444,23 @@ async def api_cron_update(request: web.Request) -> web.Response:
     # non-string or oversize name persist verbatim into crons.json.
     if "name" in kwargs:
         try:
-            kwargs["name"] = validate_string_field(
-                body, "name", max_len=MAX_SHORT_STRING
-            )
+            kwargs["name"] = validate_string_field(body, "name", max_len=MAX_SHORT_STRING)
         except ValidationError as exc:
-            return web.json_response(
-                {"error": str(exc), "code": "invalid_name"}, status=400
-            )
+            return web.json_response({"error": str(exc), "code": "invalid_name"}, status=400)
     # message routes through the same validator as POST (type check +
     # sanitize_string + length cap) so the two REST surfaces cannot diverge:
     # PATCH previously passed it through entirely unvalidated. Sanitizing here
     # also keeps length measured post-normalization, matching create.
     if "message" in kwargs:
         try:
-            kwargs["message"] = validate_string_field(
-                body, "message", max_len=MAX_CRON_MESSAGE
-            )
+            kwargs["message"] = validate_string_field(body, "message", max_len=MAX_CRON_MESSAGE)
         except ValidationError as exc:
-            return web.json_response(
-                {"error": str(exc), "code": "invalid_message"}, status=400
-            )
+            return web.json_response({"error": str(exc), "code": "invalid_message"}, status=400)
+        # Re-stamped with the NEW text, because provenance is a property of the message
+        # and not of the job: an operator editing an agent-created job was leaving the
+        # old flag in place, so their own text kept its tokens literal. Derived, not
+        # asserted, for the same reason as the create route above.
+        kwargs["operator_authored"] = request_is_operator(request)
     # folder_id must be a string (or null → ""): a non-string JSON value
     # would be persisted verbatim into the schema and corrupt reads.
     if "folder_id" in kwargs:
@@ -588,7 +591,8 @@ async def api_cron_to_chat(request: web.Request) -> web.Response:
     if job:
         history = (
             await asyncio.to_thread(state.conversation_log.read_messages, f"cron:{job.id}")
-            if state.conversation_log else []
+            if state.conversation_log
+            else []
         )
         inject_cron_result_to_dashboard(state, job, job.last_result or "", history=history)
     else:
@@ -596,12 +600,11 @@ async def api_cron_to_chat(request: web.Request) -> web.Response:
         session_key = f"cron:{job_id}"
         history = (
             await asyncio.to_thread(state.conversation_log.read_messages, session_key)
-            if state.conversation_log else []
+            if state.conversation_log
+            else []
         )
         if history:
-            slot = state.get_or_create_slot(
-                name=slot_name, agent="", origin=SlotOrigin.CRON
-            )
+            slot = state.get_or_create_slot(name=slot_name, agent="", origin=SlotOrigin.CRON)
             if not slot.linked_session_key:
                 slot.linked_session_key = session_key
                 hydrate_slot_from_history(slot, history)
@@ -613,9 +616,7 @@ async def api_cron_to_chat(request: web.Request) -> web.Response:
             )
             if not notif:
                 return web.json_response({"error": "job not found"}, status=404)
-            slot = state.get_or_create_slot(
-                name=slot_name, agent="", origin=SlotOrigin.CRON
-            )
+            slot = state.get_or_create_slot(name=slot_name, agent="", origin=SlotOrigin.CRON)
             body = notif.get("body", "")
             if body:
                 body, _ = redact_exfiltration_urls(body)
@@ -675,7 +676,9 @@ async def api_cron_history(request: web.Request) -> web.Response:
         offset = int(request.query.get("offset", "0"))
     except (ValueError, TypeError):
         offset = 0
-    runs, total = await state.crons.get_history().get_job_history(job_id, limit=limit, offset=offset)
+    runs, total = await state.crons.get_history().get_job_history(
+        job_id, limit=limit, offset=offset
+    )
     for run in runs:
         for key in ("summary", "error"):
             if run.get(key):
@@ -710,7 +713,9 @@ _SCRIPT_SOURCE_MAX_BYTES = 256 * 1024
 _SCRIPT_SOURCE_WIN_UNSUPPORTED = os.name == "nt"
 
 
-def _read_script_source_sync(script_spec: object) -> tuple[dict[str, Any] | None, tuple[str, str] | None]:
+def _read_script_source_sync(
+    script_spec: object,
+) -> tuple[dict[str, Any] | None, tuple[str, str] | None]:
     """Resolve a job's stored ``script`` spec and read its source (blocking).
 
     Returns ``(payload, None)`` on success or ``(None, (message, code))`` on
@@ -776,7 +781,9 @@ def _read_script_source_sync(script_spec: object) -> tuple[dict[str, Any] | None
     # The file and function names come from the same stored spec, so they get
     # the identical treatment — a credential-shaped name must not ride out on
     # the metadata fields either.
-    source = redact_credentials(redact_exfiltration_urls(data.decode("utf-8", errors="replace"))[0])[0]
+    source = redact_credentials(
+        redact_exfiltration_urls(data.decode("utf-8", errors="replace"))[0]
+    )[0]
     file_name = redact_credentials(redact_exfiltration_urls(os.path.basename(file_path))[0])[0]
     func = redact_credentials(redact_exfiltration_urls(func_name)[0])[0]
     return {
@@ -801,9 +808,7 @@ async def api_cron_script_source(request: web.Request) -> web.Response:
     if not job:
         return web.json_response({"error": "job not found", "code": "job_not_found"}, status=404)
     if not job.script:
-        return web.json_response(
-            {"error": "job has no script", "code": "no_script"}, status=404
-        )
+        return web.json_response({"error": "job has no script", "code": "no_script"}, status=404)
     if _SCRIPT_SOURCE_WIN_UNSUPPORTED:
         return web.json_response(
             {
@@ -907,8 +912,11 @@ async def _recognize_session(
     """
     if not sk:
         _sel().log_api_access(
-            caller="anonymous", operation=operation, outcome="denied",
-            source="dashboard", resources="missing_session_key",
+            caller="anonymous",
+            operation=operation,
+            outcome="denied",
+            source="dashboard",
+            resources="missing_session_key",
         )
         return web.json_response(
             {"error": "missing X-Session-Key", "code": "missing_session_key"},
@@ -919,8 +927,11 @@ async def _recognize_session(
         # decision itself is still an authorization outcome and must be
         # audited (every permission decision emits a SEL event).
         _sel().log_api_access(
-            caller=sk, operation=operation, outcome="allowed",
-            source="dashboard", resources="dashboard_ui",
+            caller=sk,
+            operation=operation,
+            outcome="allowed",
+            source="dashboard",
+            resources="dashboard_ui",
         )
         return None
     slot_name = sk.split(":", 1)[-1] if ":" in sk else sk
@@ -962,9 +973,7 @@ async def _recognize_session(
     # exist, and may it touch memory) from a single path resolution, so the
     # two decisions can never be made about different files.
     if not (in_slots or in_restricted or is_channel_ns):
-        exists, persisted_mode = await asyncio.to_thread(
-            _probe_persisted_session, slot_name
-        )
+        exists, persisted_mode = await asyncio.to_thread(_probe_persisted_session, slot_name)
         if not exists:
             # Slot may have been evicted from memory (idle sweep,
             # gateway restart) while the MCP subprocess keeps its
@@ -974,8 +983,11 @@ async def _recognize_session(
             # non-ephemeral — every memory_mode writes a transcript —
             # which is what ``persisted_mode`` below settles.)
             _sel().log_api_access(
-                caller=sk, operation=operation, outcome="denied",
-                source="dashboard", resources="unknown_session",
+                caller=sk,
+                operation=operation,
+                outcome="denied",
+                source="dashboard",
+                resources="unknown_session",
             )
             return web.json_response(
                 {"error": "unknown session", "code": "unknown_session"},
@@ -992,8 +1004,11 @@ async def _recognize_session(
             # the metadata line at file creation, so a normal session
             # always has one. Fail closed.
             _sel().log_api_access(
-                caller=sk, operation=operation, outcome="denied",
-                source="dashboard", resources="restricted_session_block",
+                caller=sk,
+                operation=operation,
+                outcome="denied",
+                source="dashboard",
+                resources="restricted_session_block",
             )
             return web.json_response(
                 {
@@ -1009,25 +1024,37 @@ async def _recognize_session(
         # Audit it as an allow decision so session-recovery
         # authorization is traceable alongside the deny path above.
         _sel().log_api_access(
-            caller=sk, operation=operation, outcome="allowed",
-            source="dashboard", resources="jsonl_fallback_recovery",
+            caller=sk,
+            operation=operation,
+            outcome="allowed",
+            source="dashboard",
+            resources="jsonl_fallback_recovery",
         )
     elif in_slots:
         # Live in-memory slot — the common happy path. Audit so that
         # every permission decision on this branch is traceable.
         _sel().log_api_access(
-            caller=sk, operation=operation, outcome="allowed",
-            source="dashboard", resources="live_slot",
+            caller=sk,
+            operation=operation,
+            outcome="allowed",
+            source="dashboard",
+            resources="live_slot",
         )
     elif in_restricted:
         _sel().log_api_access(
-            caller=sk, operation=operation, outcome="allowed",
-            source="dashboard", resources="restricted_key",
+            caller=sk,
+            operation=operation,
+            outcome="allowed",
+            source="dashboard",
+            resources="restricted_key",
         )
     else:  # is_channel_ns
         _sel().log_api_access(
-            caller=sk, operation=operation, outcome="allowed",
-            source="dashboard", resources="channel_namespace",
+            caller=sk,
+            operation=operation,
+            outcome="allowed",
+            source="dashboard",
+            resources="channel_namespace",
         )
     return None
 
@@ -1046,7 +1073,9 @@ async def api_lessons_create(request: web.Request) -> web.Response:
     # Block lesson writes from restricted (incognito/temporary/guest) sessions.
     sk = request.headers.get("X-Session-Key", "")
     refusal = await _recognize_session(
-        state, sk, "learn_add",
+        state,
+        sk,
+        "learn_add",
         blocks_persisted_mode=is_incognito_transcript,
     )
     if refusal is not None:
@@ -1147,9 +1176,7 @@ async def api_lessons_create(request: web.Request) -> web.Response:
                 # the one just written (self-match scores ~1.0, above the 0.85
                 # candidate ceiling), so deferring it is safe. No retry/queue: a
                 # missed sweep self-heals on the next learn_add touching the topic.
-                task = asyncio.create_task(
-                    _resolve_and_supersede(state, sk, rule, candidates, vs)
-                )
+                task = asyncio.create_task(_resolve_and_supersede(state, sk, rule, candidates, vs))
                 state._background_tasks.add(task)
                 task.add_done_callback(state._background_tasks.discard)
     else:
@@ -1160,8 +1187,10 @@ async def api_lessons_create(request: web.Request) -> web.Response:
             repo_scope=repo_scope,
             ts=datetime.now(timezone.utc).isoformat(),
         )
-        store = _get_lessons(state, cleaned.get("workspace")) if scope == "workspace" else (
-            state.lessons
+        store = (
+            _get_lessons(state, cleaned.get("workspace"))
+            if scope == "workspace"
+            else (state.lessons)
         )
         # save_or_enrich, not save: a re-submit of a stored rule carrying a new
         # NOT-clause has to attach it rather than be skipped as a duplicate.
@@ -1222,7 +1251,9 @@ async def api_lessons_delete(request: web.Request) -> web.Response:
     # memory-mode probe.
     sk = request.headers.get("X-Session-Key", "")
     refusal = await _recognize_session(
-        state, sk, "lessons.delete",
+        state,
+        sk,
+        "lessons.delete",
         blocks_persisted_mode=_is_temporary_transcript,
     )
     if refusal is not None:
@@ -1254,8 +1285,8 @@ async def api_lessons_delete(request: web.Request) -> web.Response:
     if vs_lessons:
         ok = await asyncio.to_thread(vs.delete_lesson, rule_sub)
     else:
-        store = _get_lessons(state, body.get("workspace")) if scope == "workspace" else (
-            state.lessons
+        store = (
+            _get_lessons(state, body.get("workspace")) if scope == "workspace" else (state.lessons)
         )
         # Off the loop. remove() now takes the store's shared lock, which a worker
         # thread can be holding across file I/O for a concurrent save_or_enrich --
@@ -1285,7 +1316,11 @@ async def api_crons(request: web.Request) -> web.Response:
             "name": redact_credentials(redact_exfiltration_urls(j.name)[0])[0],
             "message": redact_credentials(redact_exfiltration_urls(j.message)[0])[0],
             "enabled": j.enabled,
-            "schedule": redact_credentials(redact_exfiltration_urls(format_schedule(j.schedule, tz_name=j.timezone or tz_name))[0])[0],
+            "schedule": redact_credentials(
+                redact_exfiltration_urls(
+                    format_schedule(j.schedule, tz_name=j.timezone or tz_name)
+                )[0]
+            )[0],
             "cron_expr": j.schedule.cron_expr if j.schedule.kind == "cron" else None,
             "every_secs": j.schedule.every_secs if j.schedule.kind == "every" else None,
             "created_ts": j.created_ts or None,
@@ -1330,8 +1365,10 @@ async def api_crons(request: web.Request) -> web.Response:
             ),
             "script": redact_credentials(redact_exfiltration_urls(j.script or "")[0])[0] or None,
             "command": redact_credentials(redact_exfiltration_urls(j.command or "")[0])[0] or None,
-            "last_result": redact_credentials(redact_exfiltration_urls(j.last_result or "")[0])[0] or None,
-            "last_error": redact_credentials(redact_exfiltration_urls(j.last_error or "")[0])[0] or None,
+            "last_result": redact_credentials(redact_exfiltration_urls(j.last_result or "")[0])[0]
+            or None,
+            "last_error": redact_credentials(redact_exfiltration_urls(j.last_error or "")[0])[0]
+            or None,
             "is_running": state.crons.is_running(j.id),
             "running_since": state.crons.running_since(j.id),
         }
@@ -1458,8 +1495,11 @@ async def api_lessons(request: web.Request) -> web.Response:
     if _blocks_reads_session(state, request):
         sk = request.headers.get("X-Session-Key", "")
         _sel().log_api_access(
-            caller=sk, operation="lessons.list", outcome="denied",
-            source="dashboard", resources=sk,
+            caller=sk,
+            operation="lessons.list",
+            outcome="denied",
+            source="dashboard",
+            resources=sk,
         )
         return web.json_response({"lessons": []})
     workspace = request.query.get("workspace")
@@ -1479,9 +1519,7 @@ async def api_lessons(request: web.Request) -> web.Response:
         if not isinstance(rule, str):
             rule = str(rule)
         safe_rule = _redact_memory_field(rule)
-        safe_category = _redact_memory_field(
-            normalize_lesson_category(category, strict=False)
-        )
+        safe_category = _redact_memory_field(normalize_lesson_category(category, strict=False))
         return {"rule": safe_rule, "category": safe_category, "ts": ts}
 
     # Read from vector store if it has lessons, else JSONL

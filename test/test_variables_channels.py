@@ -1,0 +1,285 @@
+"""Tests for crew-variable expansion on inbound channel text.
+
+A channel message (Slack, Discord, Telegram, Webex, WeCom, Teams, Weixin) reaches
+the agent through one shared dispatch, so the expansion lives there once. Driving
+the whole dispatch would require a session store, a renderer and a turn driver, so
+these cover the two things the change actually introduces: the shared resolver, and
+the structural guarantee that the dispatch expands the user's text before handing it
+to the context builder.
+"""
+
+from __future__ import annotations
+
+import inspect
+from pathlib import Path
+from unittest.mock import patch
+
+from kiro_crew.config import loader as loader_mod
+from kiro_crew.config.loader import (
+    KiroCrewAgentConfig,
+    KiroCrewConfig,
+    WorkspaceConfig,
+    resolve_variables,
+)
+from kiro_crew.messaging import dispatch as dispatch_mod
+
+
+def _config() -> KiroCrewConfig:
+    cfg = KiroCrewConfig()
+    cfg.variables = {"baseUrl": "https://global.test"}
+    cfg.workspaces = {"ops": WorkspaceConfig(dir="w-ops", variables={"queue": "oncall"})}
+    cfg.default_workspace = "ops"
+    cfg.agents = {
+        "crew1": KiroCrewAgentConfig(workspace="ops", variables={"baseUrl": "https://crew.test"})
+    }
+    cfg.default_agent = "crew1"
+    return cfg
+
+
+def _values_for(agent_name: str | None = None) -> dict[str, str]:
+    """The effective map for *agent_name*, the way production resolves it.
+
+    A test-local shim rather than a shipped helper: `variable_values_for` used to live
+    in `loader.py` for this, but nothing in `src/` ever called it, so it was public
+    API maintained for the benefit of assertions. The convenience belongs here.
+    """
+    return dict(resolve_variables(loader_mod.KiroCrewConfig.load(), agent_name or None).values)
+
+
+class TestVariableValuesFor:
+    def test_returns_the_effective_map(self):
+        with patch.object(loader_mod.KiroCrewConfig, "load", classmethod(lambda cls: _config())):
+            values = _values_for("crew1")
+        assert values == {"baseUrl": "https://crew.test", "queue": "oncall"}
+
+    def test_unknown_agent_falls_back_to_the_default_crew(self):
+        with patch.object(loader_mod.KiroCrewConfig, "load", classmethod(lambda cls: _config())):
+            assert _values_for("no-such-crew")["baseUrl"] == "https://crew.test"
+
+    def test_every_resolve_call_in_production_is_guarded(self):
+        """Text is left unexpanded rather than failing the turn: a variable is a
+        convenience, and the message is still what its author meant to send.
+
+        Asserted over the AST of every module that resolves, rather than through a
+        helper. A `variable_values_for` wrapper used to swallow the exception
+        centrally, but nothing in `src/` ever called it -- so the guard that actually
+        ran was always the one at each call site, and a test through the wrapper proved
+        only that the wrapper worked. Each site also needs a DIFFERENT fallback (the
+        prompt, the message, the job's message, an empty map), which is why this cannot
+        collapse back into one helper.
+
+        Walking the AST rather than matching source text because the enclosing function
+        is nested in two of the four cases, so `getattr` cannot reach it, and a
+        fixed-size source window around the call is the anchor this repo has already
+        watched drift once.
+        """
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "src"
+        # The modules that expand operator-authored text. `handlers/variables.py` is
+        # excluded on purpose: it RENDERS the settings panel, where a malformed store
+        # must surface as an error the operator can act on, not be swallowed.
+        resolvers = (
+            # `context.py` is deliberately absent: the agent-prompt surface was
+            # withdrawn, so it resolves nothing at all. Pinned by
+            # `test_variables_expansion.TestTheAgentPromptSurfaceStaysWithdrawn`.
+            "kiro_crew/cron.py",
+            "kiro_crew/dashboard/chat_runner.py",
+            "kiro_crew/dashboard/handlers/autonudge.py",
+        )
+        checked = 0
+        for rel in resolvers:
+            tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+            # Every node that lexically contains a guarded call, so containment is a
+            # set membership test rather than a parent-pointer walk ast does not give.
+            guarded: set[int] = set()
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Try):
+                    continue
+                if not any(
+                    h.type is not None and getattr(h.type, "id", "") == "Exception"
+                    for h in node.handlers
+                ):
+                    continue
+                for child in node.body:
+                    for inner in ast.walk(child):
+                        guarded.add(id(inner))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                if (
+                    getattr(fn, "id", "") != "resolve_variables"
+                    and getattr(fn, "attr", "") != "resolve_variables"
+                ):
+                    continue
+                checked += 1
+                assert id(node) in guarded, (
+                    f"{rel}:{node.lineno} calls resolve_variables outside a "
+                    "`try/except Exception`; a malformed config would fail the turn "
+                    "instead of leaving the text unexpanded"
+                )
+        assert checked >= len(resolvers), (
+            f"only found {checked} resolve_variables call(s) across {len(resolvers)} "
+            "modules -- the guard is checking less than it thinks"
+        )
+
+    def test_returns_a_copy_so_a_caller_cannot_mutate_config_state(self):
+        cfg = _config()
+        with patch.object(loader_mod.KiroCrewConfig, "load", classmethod(lambda cls: cfg)):
+            values = _values_for("crew1")
+        values["baseUrl"] = "mutated"
+        assert cfg.agents["crew1"].variables["baseUrl"] == "https://crew.test"
+
+
+class TestDispatchLeavesInboundTextAlone:
+    """The inbound channel path hands ``build_message`` the text VERBATIM.
+
+    This class previously asserted the opposite. Inbound expansion was removed
+    because a variable's value is operator configuration while inbound text is
+    authored by a channel participant, so expanding it published operator config to
+    anyone allowed to message the bot.
+    """
+
+    def test_the_raw_turn_text_is_what_reaches_build_message(self):
+        source = inspect.getsource(dispatch_mod)
+        build_at = source.index("ctx_builder.build_message,")
+        call = source[build_at : build_at + 200]
+        assert "turn.user_text," in call, "the inbound text must be passed through unmodified"
+
+    def test_the_module_no_longer_carries_an_expander(self):
+        """Not just unused — absent. An import left in place is the first half of a
+        re-introduction, and this path must not have the capability at hand."""
+        assert not hasattr(dispatch_mod, "expand_variables")
+        assert not hasattr(dispatch_mod, "resolve_variables")
+
+    def test_a_channel_message_leaves_a_token_literal(self):
+        """The security property, scoped to the function that actually drives a turn.
+
+        An earlier version split the module source on ``def dispatch_channel_turn``
+        — a function that does not exist here (it is ``drive_turn``) — so ``split``
+        returned the whole module and the ``[:4000]`` window inspected only the
+        import header. Adding an expander inside the turn body would not have failed
+        it. Bound to the real function's own source now.
+        """
+        body = inspect.getsource(dispatch_mod.drive_turn)
+        assert "expand_variables(" not in body, "the turn body expands participant text"
+        assert (
+            "resolve_variables(" not in body
+        ), "the turn body resolves a variable map for participant text"
+
+        # And the value that WOULD be disclosed is real, so the guard is not
+        # protecting an empty set.
+        cfg = _config()
+        cfg.variables = {"SECRET": "operator-only-value"}
+        with patch.object(loader_mod.KiroCrewConfig, "load", classmethod(lambda cls: cfg)):
+            assert _values_for("crew1")["SECRET"] == "operator-only-value"
+
+
+class TestSharedHelperIsWiredWhereItMatters:
+    def test_a_value_containing_a_token_is_not_rescanned(self):
+        from kiro_crew.variables import expand
+
+        out, unresolved = expand("{{a}}", {"a": "{{b}}", "b": "boom"})
+        assert out == "{{b}}"
+        assert unresolved == frozenset()
+
+    def test_resolution_is_scoped_to_the_requested_agent(self):
+        cfg = _config()
+        cfg.agents["crew2"] = KiroCrewAgentConfig(
+            workspace="ops", variables={"baseUrl": "https://two.test"}
+        )
+        with patch.object(loader_mod.KiroCrewConfig, "load", classmethod(lambda cls: cfg)):
+            assert _values_for("crew2")["baseUrl"] == "https://two.test"
+            assert _values_for("crew1")["baseUrl"] == "https://crew.test"
+
+
+def test_turn_agent_still_selects_the_crew_for_the_system_prompt():
+    """``turn.agent`` no longer drives inbound expansion, but it still reaches
+    build_message as the crew identity — the agent SYSTEM PROMPT is
+    operator-authored and does expand, so the wrong crew there is still a defect.
+
+    Checked against the REAL ChannelTurn: an earlier version asserted
+    ``hasattr(MagicMock(), "agent")``, which a MagicMock satisfies for every
+    conceivable name, so it could not fail and said nothing about the type.
+    """
+    from kiro_crew.messaging.dispatch import ChannelTurn
+
+    assert "agent" in getattr(ChannelTurn, "__dataclass_fields__", {}) or hasattr(
+        ChannelTurn, "agent"
+    ), "ChannelTurn no longer carries an `agent` field"
+    source = inspect.getsource(dispatch_mod)
+    assert "agent=turn.agent" in source, (
+        "turn.agent must still reach build_message: the agent system prompt expands "
+        "and needs the right crew even though the inbound text does not"
+    )
+
+
+class TestNoInboundTransportExpands:
+    """Inbound channel text is NEVER expanded, and this ratchet is the guard.
+
+    A variable's value is OPERATOR configuration. Inbound channel text is authored
+    by a channel participant — ``allowed_users`` admits several people, and the
+    dispatch layer carries no operator-vs-participant distinction — so expanding it
+    would let anyone permitted to message the bot read operator config by sending
+    ``{{NAME}}`` and reading the reply. That holds whether or not the values are
+    secrets, because the operator never opted into publishing them.
+
+    This deliberately REVERSES an earlier round that added expansion to these five
+    modules. Widening the coverage widened the disclosure; the correct scope is
+    operator-authored text only (the dashboard composer, a cron message, a monitor
+    instruction). The agent system prompt is NOT on that list -- it was tried and
+    withdrawn, for the reason `test_the_agent_system_prompt_does_not_expand` states.
+
+    WHAT THIS RATCHET DOES NOT PROVE. It is an INTEGRITY boundary — participant text
+    never reaches the expander — not a confidentiality one. It removes one direct
+    read path (sending ``{{NAME}}``); it does not make a value unreadable to someone
+    in ``allowed_users``, who can still reach one through any operator-authored
+    surface a channel turn can influence. Do not cite it as though it did, and do not
+    let it justify putting a secret in a variable — v1 has no secret store.
+
+    The prompt-repetition path this paragraph used to describe is closed, because the
+    agent system prompt no longer expands at all.
+    """
+
+    TRANSPORTS = (
+        "kiro_crew/messaging/dispatch.py",
+        "kiro_crew/slack/handler.py",
+        "kiro_crew/slack/transport_dispatch.py",
+        "kiro_crew/discord/transport_dispatch.py",
+        "kiro_crew/telegram/transport_dispatch.py",
+    )
+
+    def _source(self, rel: str) -> str:
+        root = Path(__file__).resolve().parent.parent / "src"
+        return (root / rel).read_text(encoding="utf-8")
+
+    def test_no_transport_resolves_or_expands_a_variable_map(self):
+        for rel in self.TRANSPORTS:
+            src = self._source(rel)
+            assert "resolve_variables(" not in src, (
+                f"{rel} resolves a variable map for inbound channel text; a channel "
+                "participant could then read operator config by sending {{NAME}}"
+            )
+            assert "expand_variables(" not in src, f"{rel} expands inbound channel text"
+
+    def test_the_agent_system_prompt_does_not_expand(self):
+        """The withdrawal itself, pinned.
+
+        Expanding an agent prompt was tried and withdrawn: a prompt is not reliably
+        the operator's text -- an installed app supplies its own, and a `file://`
+        prompt is whatever that file holds -- so expanding it handed an untrusted app
+        agent the value of any fenced variable it named. Nothing at that point
+        distinguishes an operator-authored crew prompt from an app-installed one.
+
+        Pinned here because a withdrawal leaves no positive artifact to notice. The
+        surface is simply absent, so the obvious way to "finish" the feature later is
+        to add it back, and the reasoning against it lives only in a comment. This
+        test is what makes that re-addition fail loudly instead of shipping.
+        """
+        src = self._source("kiro_crew/context.py")
+        for call in ("resolve_variables(", "expand_variables("):
+            assert call not in src, (
+                f"context.py calls {call} -- the agent system prompt expands again. "
+                "An app-installed prompt would read any fenced variable it names."
+            )

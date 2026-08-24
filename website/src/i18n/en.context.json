@@ -235,6 +235,7 @@
     "components.crewWebhookSection.off": "Badge on a webhook credential row in the crew editor, shown when the credential's admission switch is disabled — the binding exists but cannot call in. 'Off' as in switched off, not 'remove'.",
     "components.crewWebhookSection.retry": "Button in the crew editor webhook pane's load-failure box; re-runs the fetch that failed. A verb.",
     "apps.issueRadar.views.graphView.led_run": "Status LED label on a graph node: the crew is actively running on this item. Abbreviation of \"running\"; keep it 3-4 characters, silkscreen style.",
-    "apps.issueRadar.views.graphView.led_ready": "Status LED label on a graph node: item is unblocked and ready to start. Abbreviation of \"ready\"; keep it 3-4 characters, silkscreen style."
+    "apps.issueRadar.views.graphView.led_ready": "Status LED label on a graph node: item is unblocked and ready to start. Abbreviation of \"ready\"; keep it 3-4 characters, silkscreen style.",
+    "pages.settings.variablesPanel.add": "Button on the Settings > Environment Variables panel that appends a new empty variable row to the table. Imperative verb, not the noun 'addition'; width-constrained, so keep it to one short word."
   }
 }

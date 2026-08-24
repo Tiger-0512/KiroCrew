@@ -48,12 +48,13 @@ except ImportError:
 from croniter import croniter  # type: ignore[import-untyped]
 
 from kiro_crew import cron_script, platform_compat, sel, shutdown_event
-from kiro_crew.config.loader import KiroCrewConfig, config_dir, data_home
+from kiro_crew.config.loader import KiroCrewConfig, config_dir, data_home, resolve_variables
 from kiro_crew.constants import env_flag_enabled
 from kiro_crew.cron_history import CronHistoryStore, CronRunRecord
 from kiro_crew.executors import _CRON_QUEUE_WAIT_SECS, cron_gate_budget, subprocess_executor
 from kiro_crew.resource_status import admission_check
 from kiro_crew.validation import MAX_CRON_MESSAGE
+from kiro_crew.variables import expand as expand_variables
 
 logger = logging.getLogger(__name__)
 
@@ -337,6 +338,14 @@ class CronJob:
     id: str
     name: str
     message: str
+    # Whether `message` is the OPERATOR's text. Gates `{{name}}` expansion at
+    # dispatch, and DEFAULTS TO FALSE so the failure direction is safe: `cron_add` is
+    # an MCP tool, so the agent can schedule a job whose message it wrote, and
+    # expanding that hands it the value of any variable it names -- a read oracle for
+    # a store `security.py` fences it out of. Only the dashboard's own route, where
+    # the operator typed the text, sets this. A persisted record written before this
+    # field existed takes the default and does not expand, which is the safe answer.
+    operator_authored: bool = False
     schedule: CronSchedule = field(default_factory=lambda: CronSchedule(kind="every"))
     channel: str | None = None
     thread_ts: str | None = None
@@ -527,7 +536,67 @@ class CronJob:
 # ── Session-context helper ──
 
 
-def build_cron_session_context(job: CronJob) -> tuple[str, str]:
+#: Marks a job created through the App Kit's cron SDK. `CronSDK` stamps
+#: ``created_by`` with this prefix plus the app name, and it is the only signal on the
+#: record that distinguishes an app's job from an operator's.
+_APP_OWNER_PREFIX = "app:"
+
+
+def _is_app_owned(job: CronJob) -> bool:
+    """Was *job* created by an installed app rather than by the operator?
+
+    Used to refuse an authorship claim, so it answers True whenever it cannot prove
+    otherwise is NOT the safe direction here -- an unknown creator is an operator's
+    job in every legacy record, and forcing those to False would silently stop
+    expanding jobs people already rely on. The prefix is stamped by the SDK itself,
+    so its absence is meaningful rather than merely unknown.
+    """
+    return str(getattr(job, "created_by", "") or "").startswith(_APP_OWNER_PREFIX)
+
+
+def _expand_job_variables(job: CronJob, agent: str | None = None) -> str:
+    """Return ``job.message`` with the job's crew variables substituted.
+
+    Called at DISPATCH time only. ``job.message`` on the stored record keeps its
+    literal variable tokens, so editing a variable changes what the NEXT run
+    receives without rewriting any job — and a variable rename never corrupts the
+    job the user typed.
+
+    Resolution uses the job's own crew (``agent_id``), so a job bound to a crew
+    sees that crew's and its workspace's values. A configuration failure must not
+    stop a scheduled run, so any error dispatches the message unexpanded.
+
+    *agent* overrides that crew. A multi-agent job carries ``agent_sequence``,
+    which TAKES PRECEDENCE over ``agent_id`` at dispatch, so expanding once from
+    ``agent_id`` served every sequence member the wrong crew's values — and for a
+    job that sets only ``agent_sequence`` it silently served the default crew's.
+    The dispatcher therefore expands per member.
+    """
+    if not job.message:
+        return job.message
+    if not job.operator_authored:
+        # Agent-authored: see `CronJob.operator_authored`. The tokens stay literal,
+        # which is this feature's visible failure mode everywhere else.
+        return job.message
+    try:
+        values = resolve_variables(KiroCrewConfig.load(), agent or job.agent_id or None).values
+    except Exception:
+        logger.debug("crew-variable resolution failed for job %s", job.id, exc_info=True)
+        return job.message
+    if not values:
+        return job.message
+    expanded, unresolved = expand_variables(job.message, values)
+    if unresolved:
+        # Left in place on purpose (see variables.expand); a typo hint only.
+        logger.debug(
+            "cron job %s references undefined crew variables: %s",
+            job.id,
+            ", ".join(sorted(unresolved)),
+        )
+    return expanded
+
+
+def build_cron_session_context(job: CronJob, agent: str | None = None) -> tuple[str, str]:
     """Compute (session_key, prompt) for one cron run.
 
     When ``job.persistent_session`` is True (default, legacy behaviour):
@@ -543,12 +612,23 @@ def build_cron_session_context(job: CronJob) -> tuple[str, str]:
     The key prefix ``cron:{job.id}`` is preserved in both modes so the
     reaper's existing session-matching logic continues to work.
 
+    Crew variables are expanded here — the dispatch boundary — and
+    only over ``job.message``. ``last_result`` is a PREVIOUS RUN'S MODEL OUTPUT,
+    so it is prepended after expansion and never scanned.
+
+    *agent* overrides the crew used for expansion, for a multi-agent job whose
+    ``agent_sequence`` takes precedence over ``agent_id``. The dispatcher calls this
+    per sequence member rather than expanding once, and must call THIS function
+    rather than ``_expand_job_variables`` directly: only this one prepends the
+    ``last_result`` carry-over, so bypassing it silently drops the prior-run context
+    and the do-not-repeat instruction from every run after the first.
+
     This is a pure function — all side effects (session creation, Slack
     delivery, acked_items handling) happen in the caller. Keep it that way
     so it stays trivially unit-testable.
     """
     if job.persistent_session:
-        msg = job.message
+        msg = _expand_job_variables(job, agent)
         if job.last_result:
             last = job.last_result
             if job.minimal_context and len(last) > 2000:
@@ -563,7 +643,7 @@ def build_cron_session_context(job: CronJob) -> tuple[str, str]:
 
     # Stateless: fresh key, bare message.
     run_id = uuid.uuid4().hex[:8]
-    return f"cron:{job.id}:{run_id}", job.message
+    return f"cron:{job.id}:{run_id}", _expand_job_variables(job, agent)
 
 
 # ── Cron expression matching (via croniter) ──
@@ -793,6 +873,9 @@ def _job_from_record(j: dict[str, Any]) -> CronJob:
         id=j["id"],
         name=j["name"],
         message=j["message"],
+        # `.get`, not `[...]`: a record written before this field existed takes the
+        # default, and the default is the safe answer — it does not expand.
+        operator_authored=bool(j.get("operator_authored", False)),
         schedule=CronSchedule(
             kind=j["schedule"]["kind"],
             every_secs=j["schedule"].get("every_secs"),
@@ -1066,11 +1149,7 @@ class CronService:
                     max(min(job.timeout_secs, 86400), _JOB_TIMEOUT_SECS)
                     if job
                     else _JOB_TIMEOUT_SECS
-                ) + (
-                    _pool_queue_allowance(job)
-                    + _gate_budget_allowance(job)
-                    + _vet_allowance(job)
-                )
+                ) + (_pool_queue_allowance(job) + _gate_budget_allowance(job) + _vet_allowance(job))
                 jitter_allowance = self._job_jitter.get(job_id, 0.0)
                 if elapsed <= deadline + jitter_allowance:
                     continue
@@ -1395,6 +1474,8 @@ class CronService:
         self,
         name: str,
         message: str,
+        # Whether `message` is the operator's own text; see `CronJob.operator_authored`.
+        operator_authored: bool = False,
         every_secs: int | None = None,
         at_ts: float | None = None,
         cron_expr: str | None = None,
@@ -1454,6 +1535,7 @@ class CronService:
         job = self._build_job(
             name,
             message,
+            operator_authored=operator_authored,
             every_secs=every_secs,
             at_ts=at_ts,
             cron_expr=cron_expr,
@@ -1515,9 +1597,7 @@ class CronService:
         a matching job already exists.
         """
         job = self._build_job(**kwargs)
-        persisted = await asyncio.to_thread(
-            self._persist_add_if_absent_locked, predicate, job
-        )
+        persisted = await asyncio.to_thread(self._persist_add_if_absent_locked, predicate, job)
         if not persisted:
             return None
         self._arm_timer()
@@ -1549,6 +1629,8 @@ class CronService:
         self,
         name: str,
         message: str,
+        # Whether `message` is the operator's own text; see `CronJob.operator_authored`.
+        operator_authored: bool = False,
         every_secs: int | None = None,
         at_ts: float | None = None,
         cron_expr: str | None = None,
@@ -1648,6 +1730,7 @@ class CronService:
             id=uuid.uuid4().hex[:8],
             name=name,
             message=message,
+            operator_authored=operator_authored,
             schedule=schedule,
             channel=channel,
             thread_ts=thread_ts,
@@ -1693,6 +1776,8 @@ class CronService:
         self,
         name: str,
         message: str,
+        # Whether `message` is the operator's own text; see `CronJob.operator_authored`.
+        operator_authored: bool = False,
         every_secs: int | None = None,
         at_ts: float | None = None,
         cron_expr: str | None = None,
@@ -1740,6 +1825,7 @@ class CronService:
         job = self._build_job(
             name,
             message,
+            operator_authored=operator_authored,
             every_secs=every_secs,
             at_ts=at_ts,
             cron_expr=cron_expr,
@@ -1777,7 +1863,10 @@ class CronService:
 
         Accepted kwargs: name, message, every_secs, cron_expr, agent_id, channel,
         approval_mode, silent, skip_dates, timezone, thread_ts, model,
-        timeout_secs (per-wake execution budget, 1..86400).
+        timeout_secs (per-wake execution budget, 1..86400), operator_authored.
+
+        ``operator_authored`` is read ONLY when ``message`` is also being replaced,
+        and defaults to False there; see the assignment for why.
 
         Raises :class:`CronStoreBusy` if the store lock is contended past the
         timeout; see :meth:`update_job_async` for the event-loop-safe variant.
@@ -1871,13 +1960,9 @@ class CronService:
                     try:
                         _tsecs = int(kwargs["timeout_secs"])
                     except (ValueError, TypeError) as e:
-                        raise ValueError(
-                            f"Invalid timeout_secs: {kwargs['timeout_secs']!r}"
-                        ) from e
+                        raise ValueError(f"Invalid timeout_secs: {kwargs['timeout_secs']!r}") from e
                     if not 1 <= _tsecs <= 86400:
-                        raise ValueError(
-                            f"timeout_secs must be within 1..86400, got {_tsecs}"
-                        )
+                        raise ValueError(f"timeout_secs must be within 1..86400, got {_tsecs}")
                 # Script/command subprocess timeout. MCP cron_update passes this
                 # field, so a branch has to consume it here — otherwise the
                 # update is accepted and silently dropped.
@@ -1916,6 +2001,34 @@ class CronService:
                     job.name = kwargs["name"]
                 if "message" in kwargs and kwargs["message"]:
                     job.message = kwargs["message"]
+                    # Authorship travels WITH the message, so it is re-stamped here and
+                    # nowhere else. The flag says who wrote the text that is about to be
+                    # expanded; leaving a stored `True` in place across a message replace
+                    # lets an agent inherit an operator's provenance -- edit an operator's
+                    # job through `cron_update` and the fenced variables expand into text
+                    # the agent wrote.
+                    #
+                    # Absent = False = fail closed. Only a caller that DERIVED authorship
+                    # puts this key here (the dashboard, via `request_is_operator`); the
+                    # agent-facing surfaces build their kwargs from an explicit allowlist
+                    # that has no such key, so it cannot be injected.
+                    #
+                    # Consumed only alongside a new message, which is what stops an agent
+                    # re-authorizing text it did not write: `operator_authored=True` with
+                    # no message is a no-op, not a promotion.
+                    # DERIVED at the end, never simply accepted. An app-owned job can
+                    # never carry operator authorship whatever the caller passed:
+                    # `CronSDK.update_job` forwards **kwargs verbatim, so an app can put
+                    # `operator_authored=True` on the wire, and honouring it would expand
+                    # fenced values into text the app wrote. (`CronSDK.add_job` cannot --
+                    # it has an explicit keyword signature. The asymmetry is the bug.)
+                    #
+                    # Enforced HERE rather than only at the SDK because this is the one
+                    # place every caller converges; a per-surface strip has to be
+                    # remembered by each new app-facing surface, and the one that forgets
+                    # fails open.
+                    claimed = bool(kwargs.get("operator_authored", False))
+                    job.operator_authored = claimed and not _is_app_owned(job)
                 if "agent_id" in kwargs:
                     job.agent_id = kwargs["agent_id"] or ""
                 if "channel" in kwargs:
@@ -2849,14 +2962,10 @@ class CronService:
                         decision.reason,
                     )
                 else:
-                    logger.debug(
-                        "Cron: still deferring %d scheduled job(s)", len(deferred)
-                    )
+                    logger.debug("Cron: still deferring %d scheduled job(s)", len(deferred))
             elif self._admission_deferring:
                 self._admission_deferring = False
-                logger.info(
-                    "Cron: memory posture recovered — resuming scheduled firings"
-                )
+                logger.info("Cron: memory posture recovered — resuming scheduled firings")
 
             if not due:
                 return
@@ -3093,10 +3202,7 @@ class CronService:
         # one another.  Only command/script jobs go through the pool, so a
         # message job's budget is left exactly as set.
         deadline = (
-            timeout
-            + _pool_queue_allowance(job)
-            + _gate_budget_allowance(job)
-            + _vet_allowance(job)
+            timeout + _pool_queue_allowance(job) + _gate_budget_allowance(job) + _vet_allowance(job)
         )
         # Fresh run: no failure counted yet. The timeout handler below reads
         # this to avoid double-counting a run that already recorded its
@@ -3601,6 +3707,12 @@ class CronService:
                     "id": j.id,
                     "name": j.name,
                     "message": j.message,
+                    # Serialized beside `message`, because it is a property OF that
+                    # message. This dict is hand-written per field, so a new field is
+                    # dropped silently: omitting it made every operator job come back
+                    # from disk as agent-authored, and expansion stopped working after
+                    # the first save — the feature breaking, not just a guard slipping.
+                    "operator_authored": j.operator_authored,
                     "schedule": asdict(j.schedule),
                     "channel": j.channel,
                     "thread_ts": j.thread_ts,

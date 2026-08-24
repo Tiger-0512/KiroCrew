@@ -1657,6 +1657,97 @@ export interface WebhookRunRecord {
   detail?: string
 }
 
+/**
+ * `GET /api/variables` — every scope's stored pairs plus the resolved cascade.
+ *
+ * `effective` is the map an agent turn would actually see for the requested
+ * context, and `winning_scope` names which layer supplied each of those values
+ * (`global` | `workspace` | `crew` | `session`). The two together are what lets a
+ * row say "this pair is stored here but something narrower wins".
+ */
+export interface VariablesView {
+  global: Record<string, string>
+  /** Keyed by workspace name; each entry holds only that workspace's OWN pairs. */
+  workspaces: Record<string, Record<string, string>>
+  effective: Record<string, string>
+  winning_scope: Record<string, string>
+  /**
+   * The workspace the ACTIVE cascade resolves through.
+   *
+   * `winning_scope` is computed for that one context, so it only describes rows in
+   * this workspace. Applying it to every workspace's table labels a row "shadowed
+   * by Crew" when nothing shadows it there.
+   */
+  active_workspace?: string
+  /**
+   * Pairs a workspace's dotenv file supplies, keyed by workspace name.
+   *
+   * READ-ONLY: this endpoint does not write those files. Reported so the panel can
+   * show them — a file-defined key that a panel key shadows would otherwise look
+   * like the panel edit had no effect, and a value the operator cannot see is a
+   * value they cannot debug.
+   */
+  workspace_files?: Record<string, Record<string, string>>
+  /** Directory holding those files, so the panel can name where to edit them. */
+  workspace_file_dir?: string
+  /**
+   * Why a workspace can have no dotenv file, keyed by workspace name. Absent from
+   * the map means it can. Reported so the panel can SAY it — a workspace silently
+   * showing no file rows, with the reason only in a gateway log, is the invisible
+   * failure this feature avoids everywhere else.
+   */
+  workspace_file_blocked?: Record<string, string>
+}
+
+/**
+ * `PUT /api/variables` — a PER-KEY patch to ONE scope.
+ *
+ * `set` names pairs to write and `delete` names keys to remove; a key neither
+ * names is left untouched. Deleting is an explicit verb, which is what keeps the
+ * empty string unambiguous — it stays a legal value that still wins over a broader
+ * scope, so it cannot share an encoding with "unset".
+ *
+ * This replaced a whole-scope write, which required echoing back a map read from
+ * the MERGED cascade and drew a data-loss finding in three consecutive review
+ * rounds: a value shadowed by a narrower scope was invisible in that read and got
+ * dropped, and two tabs replacing the same scope clobbered each other's unrelated
+ * edits.
+ */
+export interface VariablesWrite {
+  scope: 'global' | 'workspace'
+  /** Required when `scope` is `workspace`; ignored otherwise. */
+  workspace?: string
+  /**
+   * A PER-KEY patch, not a whole-scope replacement.
+   *
+   * `set` names pairs to write and `delete` names keys to remove; a key neither
+   * names is left untouched. The replacement form it replaced required echoing
+   * back a map read from the MERGED cascade, which lost a value shadowed by a
+   * narrower scope and let two tabs clobber each other's unrelated edits.
+   */
+  set?: Record<string, string>
+  delete?: string[]
+  /**
+   * A whole scope as dotenv text, applied server-side as a per-key diff: every pair
+   * in the text is set, and every stored key ABSENT from it is deleted.
+   *
+   * Mutually exclusive with `set`/`delete` — they describe the scope two different
+   * ways, so applying both would make the result depend on which ran last. The text
+   * is parsed by the backend rather than here, so one parser stays authoritative
+   * over what a stored value may contain.
+   */
+  bulk?: string
+  /**
+   * The scope's pairs as the bulk editor saw them when it opened. Required with
+   * `bulk`, and compared server-side INSIDE the locked store mutation — values
+   * included, not just key presence. A bulk apply deletes every name absent from the
+   * text and overwrites every name in it, so a key or a value another writer changed
+   * in the meantime would be lost to text this operator never saw. Any drift is
+   * refused with 409 rather than merged.
+   */
+  base?: Record<string, string>
+}
+
 export interface WebhooksView {
   /** Effective state: `has_tokens && switch_on`. */
   enabled: boolean
@@ -2273,6 +2364,12 @@ export const api = {
   kirocrewConfig: () => fetch('/api/config/kirocrew').then(j),
   saveKirocrewConfig: (agent: object) => put('/api/config/kirocrew', { agent }).then(j) as Promise<{ ok?: boolean; restart_required?: boolean; error?: string }>,
   patchConfig: (path: string, value: unknown) => fetch('/api/config/kirocrew', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, value }) }).then(j),
+  // Environment variables (crew variables). `variables()` returns the pairs
+  // config.json itself holds for each scope, plus the resolved effective map and
+  // which keys config.local.json supplies; `saveVariables()` applies a PER-KEY
+  // patch (`set`/`delete`) so a write cannot disturb a key it does not name.
+  variables: () => fetch('/api/variables').then(j) as Promise<VariablesView>,
+  saveVariables: (body: VariablesWrite) => put('/api/variables', body).then(j) as Promise<{ ok?: boolean; error?: string; key?: string }>,
   // Optional integrations — backend endpoints are graceful no-ops on a public
   // install (AIM / kiro usage are stubbed). Kept so the UI compiles and
   // degrades gracefully (panels render empty when the feature is absent).

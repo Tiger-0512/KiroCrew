@@ -64,6 +64,28 @@ from kiro_crew.validation import (
 logger = logging.getLogger(__name__)
 
 
+def request_is_operator(request: Any) -> bool:
+    """Whether this HTTP request carries the OPERATOR's own text.
+
+    The single place that answer is computed. Every dashboard route that can expand
+    ``{{name}}`` must call this rather than assert authorship for itself, because the
+    same routes serve APP tokens (App Kit §5.2) as well as the operator's browser --
+    and an app is automation like the MCP and workflow callers. A route that hardcodes
+    the claim tells the expander an app-authored message was the operator's, handing an
+    app the value of any fenced variable it names.
+
+    That is not a hypothetical: the composer, the monitor-loop routes and both cron
+    routes each hardcoded it, and each was found in a separate review round. One shared
+    predicate is what makes the next such route a one-line call instead of a fifth
+    instance -- and ``test_variables_operator_authored`` fails the build if a handler
+    hardcodes the claim again.
+
+    Keyed on ``request["app"]``, the same value the App Kit ownership checks use, so
+    there is one notion of who is calling rather than two that can disagree.
+    """
+    return not request.get("app", "")
+
+
 async def run_config_write(fn, /, *args, **kwargs):
     """Run a blocking ``config.json`` writer under BOTH config locks.
 
@@ -130,7 +152,10 @@ def _redact_tool_field(text: str | None, *, limit: int = _MAX_TOOL_FIELD) -> str
         if len(encoded) > limit:
             # errors="ignore" cleanly drops a partial trailing multi-byte
             # sequence at the cut point.
-            text = encoded[:limit].decode("utf-8", errors="ignore") + f"\n… [truncated at {limit:,} bytes]"
+            text = (
+                encoded[:limit].decode("utf-8", errors="ignore")
+                + f"\n… [truncated at {limit:,} bytes]"
+            )
     text, _ = redact_exfiltration_urls(text)
     text, _ = redact_credentials(text)
     return text
@@ -158,9 +183,13 @@ def _build_stream_chunk(msg: dict) -> str:
     else:
         cls_val = _redact_deep(cls_val)
     return json.dumps(
-        {"type": msg.get("role", ""), "content": content, "ts": msg.get("ts", ""),
-         "cls": cls_val,
-         **({"meta": meta} if meta else {})}
+        {
+            "type": msg.get("role", ""),
+            "content": content,
+            "ts": msg.get("ts", ""),
+            "cls": cls_val,
+            **({"meta": meta} if meta else {}),
+        }
     )
 
 
@@ -336,7 +365,11 @@ def _broadcast_auto_tool(state: DashboardState, slot: _ChatSlot, event: "LLMEven
     state.broadcast_ws(
         "tool_call",
         {
-            "slot": slot.key, "tool": title, "kind": kind, "auto": True, "tool_call_id": tcid,
+            "slot": slot.key,
+            "tool": title,
+            "kind": kind,
+            "auto": True,
+            "tool_call_id": tcid,
             "purpose": _redact_tool_field(event.tool_purpose, limit=_MAX_TOOL_PURPOSE),
             "input_preview": _redact_tool_field(event.tool_input),
         },
@@ -344,9 +377,7 @@ def _broadcast_auto_tool(state: DashboardState, slot: _ChatSlot, event: "LLMEven
     return title
 
 
-def _append_compaction_notice(
-    state: DashboardState, slot: _ChatSlot, msg_text: str
-) -> None:
+def _append_compaction_notice(state: DashboardState, slot: _ChatSlot, msg_text: str) -> None:
     """Append a compaction status notice as an assistant message and broadcast it.
 
     The notice is tagged ``kind="compaction"`` so the dashboard can tell it apart
@@ -492,7 +523,7 @@ def _history_key_for(slot_key: str) -> str:
     if slot_key.startswith("dashboard:"):
         return slot_key
     while slot_key.startswith("dashboard_"):
-        slot_key = slot_key[len("dashboard_"):]
+        slot_key = slot_key[len("dashboard_") :]
     return f"dashboard:{slot_key}"
 
 
@@ -523,9 +554,7 @@ def dashboard_slot_key(session_key: str) -> str:
         # (``cron:<job_id>``), so the surface gate is checked against both
         # spellings. Whichever matched, the displaying tab is the job's own.
         job_id = session_key.removeprefix("cron:").split(":", 1)[0]
-        if not (
-            has_dashboard_surface(session_key) or has_dashboard_surface(f"cron:{job_id}")
-        ):
+        if not (has_dashboard_surface(session_key) or has_dashboard_surface(f"cron:{job_id}")):
             return ""
         return _normalize_slot_key(f"cron-{job_id}")
     if not has_dashboard_surface(session_key):
@@ -1242,7 +1271,7 @@ def _maybe_inject_persona(
         and isinstance(theme_consent_sha, str)
         and THEME_CONSENT_SHA_RE.fullmatch(theme_consent_sha)
     ):
-        text = _installed_theme_persona(color_theme[len("custom-"):])
+        text = _installed_theme_persona(color_theme[len("custom-") :])
         if text:
             actual = hashlib.sha256(text.encode("utf-8")).hexdigest()
             if hmac.compare_digest(actual, theme_consent_sha):
@@ -1278,8 +1307,10 @@ def _maybe_consolidate(state, slot) -> None:
         state.consolidator.maybe_consolidate(effective_session_key(slot))
     elif state.consolidator and slot.is_restricted:
         sel().log_api_access(
-            caller=f"dashboard:{slot.key}", operation="consolidate",
-            outcome="denied", source="dashboard",
+            caller=f"dashboard:{slot.key}",
+            operation="consolidate",
+            outcome="denied",
+            source="dashboard",
             resources="restricted_session_block",
         )
 
@@ -1527,10 +1558,7 @@ _APPROVAL_GATED_RE = re.compile(
     # delete it now" is as gated as "If you approve ...". Bias toward reject is
     # safe here (a false reject just lands normally); the #2696 GPT round widened
     # this from the pronoun list after "If CI passes ..." slipped through.
-    r"\bif\b"
-    r"|\bjust\s+say\s+the\s+word\b"
-    r"|\bwant\s+me\s+to\b"
-    r"|\bshall\s+i\b"
+    r"\bif\b" r"|\bjust\s+say\s+the\s+word\b" r"|\bwant\s+me\s+to\b" r"|\bshall\s+i\b"
     # Consent DEFERRAL: the action is gated on the user's approval/confirmation,
     # even when the sentence reads as "I'll ... now" ("I'll wait for your approval
     # before I delete it right now"). The earlier list only caught "with your
@@ -1971,7 +1999,7 @@ def _dequeue_next_message(slot, merge_enabled: bool) -> tuple:
                 break
             to_merge.append(item)
         if len(to_merge) > 1:
-            del slot._queue[:len(to_merge)]
+            del slot._queue[: len(to_merge)]
             merged = "\n\n".join(item["content"] for item in to_merge)
             return f"[{len(to_merge)} queued messages merged]\n\n{merged}", to_merge
     item = slot.queue_pop(0)

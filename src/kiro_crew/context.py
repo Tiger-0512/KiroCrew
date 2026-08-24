@@ -2515,6 +2515,7 @@ class ContextBuilder:
         user_span_out: list[int] | None = None,
         needs_reinjection: bool = False,
         context_groups: frozenset[str] | None = None,
+        trigger_text: str | None = None,
     ) -> tuple[str, HookResult]:
         """Build the full message with context and hook processing.
 
@@ -2581,6 +2582,21 @@ class ContextBuilder:
             if agent_prompt:
                 agent_prompt = self._resolve_prompt_templates(agent_prompt, session_key or "")
                 agent_prompt = self._substitute_bot_name(agent_prompt)
+                # LAST of the token passes, and after _load_agent_prompt, so a
+                # custom agent's prompt is covered too and a user variable can
+                # never alter a built-in token's substituted value.
+                #
+                # Agent system prompts are NOT expanded. An agent prompt is not
+                # reliably the operator's text: an installed app supplies its own, and
+                # a `file://` prompt is whatever that file holds, so expanding here
+                # handed an untrusted app agent the value of any fenced variable it
+                # named. There is no signal at this point that distinguishes an
+                # operator-authored crew prompt from an app-installed one, and guessing
+                # is what produced three earlier rounds of this same finding.
+                #
+                # Withdrawn rather than gated: the four operator-authored surfaces that
+                # remain (composer, cron, monitor loop, per-sequence member) each have a
+                # caller that can state authorship truthfully. This one does not.
                 parts.append(
                     f"[AGENT SYSTEM PROMPT]\n{agent_prompt}\n[END AGENT SYSTEM PROMPT]\n\n"
                 )
@@ -2912,7 +2928,14 @@ class ContextBuilder:
         # history so a body already sent earlier in the conversation is still
         # in the window.
         if not is_custom and not minimal_context:
-            triggered = self.skills.get_triggered_skills(text, project_dir=project)
+            # Match on what the USER wrote, not on what crew variables
+            # expanded it into. Word-overlap matching means a value holding
+            # an ordinary word (a URL path, a queue name) would otherwise
+            # pull in an unrelated skill BODY that the user never referenced.
+            # Callers that expand variables pass the pre-expansion text;
+            # everyone else gets the existing behaviour via the default.
+            trigger_source = text if trigger_text is None else trigger_text
+            triggered = self.skills.get_triggered_skills(trigger_source, project_dir=project)
             if triggered:
                 enforced, pointer_only = self.skills.split_triggered(triggered, project)
                 # Log the split, not just the match: a pointed-at skill the
