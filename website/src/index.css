@@ -1426,11 +1426,13 @@ button:hover .app-icon{--ico-a:var(--accent);--ico-b:var(--text)}
 @keyframes csb-a{0%,30%{opacity:1;transform:translateY(0) scale(1)}38%{opacity:0;transform:translateY(-3px) scale(.6)}45%,82%{opacity:0;transform:translateY(3px) scale(.6)}90%,100%{opacity:1;transform:translateY(0) scale(1)}}
 @keyframes csb-b{0%,30%{opacity:0;transform:translateY(3px) scale(.6)}38%{opacity:0;transform:translateY(3px) scale(.6)}45%{opacity:1;transform:translateY(-2px) scale(1)}55%{opacity:1;transform:translateY(0) scale(1)}82%{opacity:1;transform:translateY(0) scale(1)}90%{opacity:0;transform:translateY(-3px) scale(.6)}100%{opacity:0;transform:translateY(3px) scale(.6)}}
 
-/* ── Kiro themes: the ghost-pose loader icons ──
-   The icons come from the themeBranding `loaderIcons` seam (see ChatFooter); they
-   are brand ASSETS rendered as <img> (the use-lucide-icons brand-mark exception
-   requires that), so they are themed from here rather than by editing the art.
-   This is the pattern a new theme follows: register the artwork, then style it. */
+/* ── The ghost-pose loader icons ──
+   These are the DEFAULT loader artwork for every theme (see ChatFooter's
+   DEFAULT_ICONS); a theme replaces them through the themeBranding `loaderIcons`
+   seam. They are brand ASSETS rendered as <img> (the use-lucide-icons brand-mark
+   exception requires that), so they are themed from here rather than by editing
+   the art. This is the pattern a new theme follows: register the artwork, then
+   style it. */
 .csb4 .lyr>.kp{width:100%;height:100%;object-fit:contain}
 /* The outline is a REAL vector stroke baked into each pose asset (black, scaled
    per-viewBox so all 8 render at the same 1px), not a CSS effect. Chained
