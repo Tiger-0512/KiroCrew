@@ -6065,6 +6065,10 @@ class SubagentManager:
                 _complete_event,
                 provider="claude_code" if is_cc else "acp",
                 surface="subagent",
+                # Ownership stamp (see _build_token_record): an app-dispatched
+                # subagent's spend must be readable by that app's audit — the
+                # illustrator lane of an app is exactly this path.
+                app=info.app or "",
                 # Explicit/inherited `agent` FIRST here — unlike every other
                 # surface. Under session sharing this subagent reuses the
                 # PARENT's runtime, so read_effective_agent() would report the

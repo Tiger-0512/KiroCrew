@@ -23,6 +23,7 @@ Percentiles are interpolated from the histogram buckets (the DELTA-temporality
 exporter + the explicit-bucket View in ``provider.py`` make this meaningful and
 day-additive). mean/min/max are exact from the data point.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -36,10 +37,17 @@ from typing import Any, Iterator, NamedTuple
 from aiohttp import web
 
 from kiro_crew import __version__, beacon
+from kiro_crew import sel as _sel_mod
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.config.paths import config_dir
 from kiro_crew.dashboard.chat_utils import slot_transcript_key
-from kiro_crew.dashboard.handlers.usage import context_occupancy, context_trace, cost_breakdown
+from kiro_crew.dashboard.handlers.usage import (
+    SPEND_WINDOW_DAYS,
+    context_occupancy,
+    context_trace,
+    cost_breakdown,
+    slot_turn_usage,
+)
 from kiro_crew.dashboard.state import NEW_SESSION_TITLE
 from kiro_crew.hooks import validate_file_path
 from kiro_crew.metrics.provider import TELEMETRY_ENV_VAR, env_pin
@@ -91,9 +99,7 @@ _OTHER_SPLIT_ATTRS = frozenset({"warm"})
 # cross-module test enforces that, so a dead entry (e.g. a "cancelled" label
 # nothing ever emitted — user cancels map to "error") cannot linger and
 # mislead readers about what fault_rate counts.
-_TERMINAL_FAULT_OUTCOMES = frozenset(
-    {"error", "timeout", "unknown", "stall_exhausted"}
-)
+_TERMINAL_FAULT_OUTCOMES = frozenset({"error", "timeout", "unknown", "stall_exhausted"})
 
 # (shard-fingerprint, TTL) cache — shards are append-only, so a change to any
 # shard's (mtime, size) invalidates the cache exactly when needed (same pattern
@@ -185,9 +191,7 @@ def _shards_in_window(directory: Path, days: int) -> list[Path]:
     return out
 
 
-def _pct_from_buckets(
-    bucket_counts: list[int], bounds: list[float], q: float
-) -> float:
+def _pct_from_buckets(bucket_counts: list[int], bounds: list[float], q: float) -> float:
     """Interpolate the q-quantile (0..1) from explicit histogram buckets.
 
     ``bucket_counts`` has one more element than ``bounds`` (the trailing +Inf
@@ -374,9 +378,14 @@ class _Hist:
         g = self._dominant()
         if g is None:
             return {
-                "count": 0, "mean_ms": 0.0, "p50_ms": 0.0,
-                "p90_ms": 0.0, "min_ms": 0.0, "max_ms": 0.0,
-                "other_generations": 0, "total_count": 0,
+                "count": 0,
+                "mean_ms": 0.0,
+                "p50_ms": 0.0,
+                "p90_ms": 0.0,
+                "min_ms": 0.0,
+                "max_ms": 0.0,
+                "other_generations": 0,
+                "total_count": 0,
             }
         cnt = int(g["count"])
         return {
@@ -555,9 +564,7 @@ def _aggregate(shard_paths: list[Path]) -> dict[str, Any]:
             # Which conversation source paid this startup. Older shards predate
             # the attribute, so they aggregate under "unknown" rather than being
             # dropped.
-            by_channel.setdefault(
-                str(attrs.get("channel", "unknown")), _Hist()
-            ).add(dp)
+            by_channel.setdefault(str(attrs.get("channel", "unknown")), _Hist()).add(dp)
             # Outcomes go through _Hist so they are scoped to the same bounds
             # generation as the count and percentiles reported.
             overall.add(dp, outcome=oc)
@@ -607,15 +614,11 @@ def _aggregate(shard_paths: list[Path]) -> dict[str, Any]:
             # Internal phase split (kiro backend): spawn_init, session_new,
             # set_model. Deliberately outside the startup totals above — these
             # are components of one startup, not startups.
-            "phases": [
-                {"name": n, **phases[n].stats()} for n in sorted(phases)
-            ],
+            "phases": [{"name": n, **phases[n].stats()} for n in sorted(phases)],
             # Startup cost grouped by conversation source, so a slow surface can
             # be identified directly instead of being inferred by correlating
             # export windows against the gateway log.
-            "by_channel": [
-                {"name": n, **by_channel[n].stats()} for n in sorted(by_channel)
-            ],
+            "by_channel": [{"name": n, **by_channel[n].stats()} for n in sorted(by_channel)],
         },
         "turn": turn_block,
         "other": other,
@@ -632,9 +635,7 @@ def _parse_startup_metrics() -> dict[str, Any]:
         return {"startup": None, "turn": None, "other": [], "shard_count": 0}
 
     try:
-        key = tuple(
-            sorted((str(p), p.stat().st_mtime, p.stat().st_size) for p in shards)
-        )
+        key = tuple(sorted((str(p), p.stat().st_mtime, p.stat().st_size) for p in shards))
     except OSError:
         key = None
     now = time.time()
@@ -735,11 +736,83 @@ async def api_context_trace(request: web.Request) -> web.Response:
     """
     slot = (request.query.get("slot") or "").strip()
     if not slot:
-        return web.json_response(
-            {"error": "slot is required", "code": "slot_required"}, status=400
-        )
+        return web.json_response({"error": "slot is required", "code": "slot_required"}, status=400)
     trace = await asyncio.to_thread(context_trace, slot, _WINDOW_DAYS)
     return web.json_response(trace)
+
+
+async def api_usage_turns(request: web.Request) -> web.Response:
+    """GET /api/usage/turns?slot=<session key>[&days=N] — per-turn usage rows.
+
+    The per-turn drill-down under the Spend tab's aggregate, and the surface an
+    APP is granted (via its manifest's ``permissions.api``) to account for what
+    its own agent slots cost — tokens, credits, duration and the context meter,
+    one row per turn. Same independence as the context trace: usage rows are
+    always written, so this works with OTEL collection off.
+
+    App isolation is ROW-level (App Kit §5.2, deny-by-default): an app caller
+    receives only rows stamped with its own app at write time, however the slot
+    is named and whether or not it is still live. A foreign slot key therefore
+    answers 200 with no rows — indistinguishable from a slot that never ran —
+    and rows that predate the stamp are invisible to app callers. A live-slot
+    ownership check was deliberately rejected: it leaks on slot-name reuse and
+    denies an app its own completed sessions, which are exactly what an audit
+    reads. A DISABLED app is refused outright (``is_app_enabled``,
+    deny-by-default, same gate the opt-in builtin routes wrap every handler
+    in): disable must revoke read access, not only future writes.
+
+    Every app-caller decision is SEL-logged — including a malformed request's
+    refusal, so a probing app leaves a trail — and all SEL calls plus the
+    enablement check run off-loop (first use initialises SEL's key material on
+    disk). ``days`` clamps to the spend window's ceiling rather than refusing:
+    shards beyond it have been retired anyway.
+    """
+    request_app = str(request.get("app", "") or "")
+    slot = (request.query.get("slot") or "").strip()
+
+    def _audit(outcome: str, error: str = "", resources: str = "") -> None:
+        _sel_mod.sel().log_api_access(
+            caller=request_app,
+            operation="usage_turns",
+            outcome=outcome,
+            source="app_isolation",
+            resources=resources or f"slot={slot or '(missing)'}",
+            error=error,
+        )
+
+    if request_app and not await asyncio.to_thread(_app_is_enabled, request_app):
+        await asyncio.to_thread(_audit, "denied", "app is disabled")
+        return web.json_response({"error": "not found", "code": "not_found"}, status=404)
+    if not slot:
+        if request_app:
+            await asyncio.to_thread(_audit, "denied", "slot missing")
+        return web.json_response({"error": "slot is required", "code": "slot_required"}, status=400)
+    try:
+        days = int(request.query.get("days") or SPEND_WINDOW_DAYS)
+    except ValueError:
+        days = SPEND_WINDOW_DAYS
+    days = max(1, min(days, SPEND_WINDOW_DAYS))
+    turns = await asyncio.to_thread(
+        slot_turn_usage, slot, days, app=request_app if request_app else None
+    )
+    if request_app:
+        await asyncio.to_thread(_audit, "allowed", "", f"slot={slot} rows={len(turns)}")
+    return web.json_response({"slot": slot, "days": days, "turns": turns})
+
+
+def _app_is_enabled(app_name: str) -> bool:
+    """Deny-by-default enablement probe, import deferred to the worker thread.
+
+    Late import for the same reason the builtin routes defer theirs: the apps
+    manager pulls in the registry, and a module-scope import here would create
+    a handlers→apps import edge the dashboard package deliberately avoids.
+    """
+    try:
+        from kiro_crew.apps.manager import is_app_enabled
+
+        return bool(is_app_enabled(app_name))
+    except Exception:  # noqa: BLE001 — an unanswerable check is a denial
+        return False
 
 
 def _persisted_titles(conversation_log: Any, slot_keys: list[str]) -> dict[str, str]:
@@ -834,9 +907,7 @@ async def _with_conversation_titles(request: web.Request, cost: dict[str, Any]) 
 
     conversation_log = getattr(state, "conversation_log", None)
     if unresolved and conversation_log is not None:
-        titles.update(
-            await asyncio.to_thread(_persisted_titles, conversation_log, unresolved)
-        )
+        titles.update(await asyncio.to_thread(_persisted_titles, conversation_log, unresolved))
 
     rows = []
     for row in conversations:

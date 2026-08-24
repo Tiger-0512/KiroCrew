@@ -10,7 +10,7 @@ import math
 import re
 import time
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -206,9 +206,7 @@ def slot_spend(days: int = SPEND_WINDOW_DAYS) -> dict[str, dict[str, float]]:
                     # cutoff must still be excluded individually.
                     ts_raw = str(obj.get("ts") or "")
                     try:
-                        ts_str = (
-                            ts_raw[:-1] + "+00:00" if ts_raw.endswith("Z") else ts_raw
-                        )
+                        ts_str = ts_raw[:-1] + "+00:00" if ts_raw.endswith("Z") else ts_raw
                         ts_epoch = datetime.fromisoformat(ts_str).timestamp()
                     except (ValueError, TypeError, AttributeError):
                         continue
@@ -505,6 +503,112 @@ def context_occupancy(days: int = 14) -> dict[str, Any]:
     )
 
 
+#: Numeric per-turn fields copied from a shard row into a usage-turns row, in
+#: the order the API returns them. One owner: the reader below and its tests
+#: both consume this tuple, so a field added to the recorder shows up in the
+#: API by being added HERE, not by editing two lists that can drift.
+TURN_USAGE_FIELDS: tuple[str, ...] = (
+    "input",
+    "output",
+    "cache_create",
+    "cache_read",
+    "credits",
+    "cost",
+    "duration_ms",
+    "context_used",
+    "context_window",
+)
+
+
+def _parse_row_ts(raw: str) -> float | None:
+    """A shard row's ``ts`` as an epoch, or ``None`` when unparseable.
+
+    The SAME spelling as this module's other shard-ts readers (``Z`` rewritten
+    to ``+00:00`` for py3.10's ``fromisoformat``; a naive stamp interpreted in
+    local time via ``.timestamp()``): two readers of the same rows must not
+    disagree about which rows a window contains.
+    """
+    try:
+        ts_str = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        return datetime.fromisoformat(ts_str).timestamp()
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def slot_turn_usage(
+    slot: str, days: int = SPEND_WINDOW_DAYS, *, app: str | None = None
+) -> list[dict[str, Any]]:
+    """Per-turn usage rows for ONE session, oldest first.
+
+    The per-turn drill-down under :func:`slot_spend`'s aggregate: each row is
+    one turn's shard record — model, token counts, credits, duration, and the
+    context meter — for the slot named. Built for the app-facing usage API: an
+    app that runs agent sessions (via app-owned slots) can account for what its
+    own turns cost without reaching into the shard files, whose location and
+    row shape are this module's private contract.
+
+    Same walk and the same reasons as :func:`context_trace`: per-session
+    per-turn detail stays OUT of the OTEL pipeline because slot keys are
+    unbounded-cardinality labels. Malformed lines and foreign slots are
+    skipped, not errors — a shard is an append-only log written by a live
+    gateway, and a torn tail line is expected during a write.
+
+    ``app`` is the ownership filter for app callers: only rows STAMPED with
+    that app at write time are returned. Ownership recorded on the row is what
+    survives the slot — a live-slot check both leaks on slot-name reuse (a
+    recreated slot vouches for the previous owner's rows) and denies an app
+    its own completed sessions. Rows written before the stamp existed carry no
+    ``app`` and are invisible to app callers: deny-by-default for ownership
+    that was never recorded. ``None`` (the dashboard) reads everything.
+
+    The window is enforced per ROW, not only per shard file: the oldest shard
+    in the window covers a whole day, so without a row-level cutoff a request
+    for N days returns rows up to a day older than asked — wrong in the one
+    place this API exists for, accounting.
+    """
+    turns: list[dict[str, Any]] = []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
+    for shard_path in _shards_in_window(days):
+        try:
+            with shard_path.open() as fh:
+                for line in fh:
+                    try:
+                        obj = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(obj, dict) or obj.get("_type") != "tokens":
+                        continue
+                    if str(obj.get("slot") or "") != slot:
+                        continue
+                    if app is not None and str(obj.get("app") or "") != app:
+                        continue
+                    ts = _parse_row_ts(str(obj.get("ts") or ""))
+                    if ts is None or ts < cutoff:
+                        # An unparseable timestamp cannot prove it is inside the
+                        # window; accounting excludes what it cannot date.
+                        continue
+                    row: dict[str, Any] = {
+                        "ts": str(obj.get("ts") or ""),
+                        "model": str(obj.get("model") or ""),
+                    }
+                    for field in TURN_USAGE_FIELDS:
+                        value = obj.get(field)
+                        # ints are accepted directly: math.isfinite would convert
+                        # to float first and an oversized int raises OverflowError
+                        # (a corrupt row must never 500 the endpoint). bool is an
+                        # int subclass and is not a count.
+                        if isinstance(value, bool):
+                            continue
+                        if isinstance(value, int) or (
+                            isinstance(value, float) and math.isfinite(value)
+                        ):
+                            row[field] = value
+                    turns.append(row)
+        except (OSError, UnicodeDecodeError):
+            continue
+    return turns
+
+
 def context_trace(slot: str, days: int = 14) -> dict[str, Any]:
     """Per-turn injection breakdown for one session, newest shard last.
 
@@ -546,9 +650,7 @@ def context_trace(slot: str, days: int = 14) -> dict[str, Any]:
                     raw = obj.get("ctx_blocks")
                     if not isinstance(raw, dict) or not raw:
                         continue
-                    blocks = {
-                        str(k): _coerce_int(v) for k, v in raw.items() if _coerce_int(v) > 0
-                    }
+                    blocks = {str(k): _coerce_int(v) for k, v in raw.items() if _coerce_int(v) > 0}
                     if not blocks:
                         continue
                     for label, size in blocks.items():
@@ -704,9 +806,11 @@ def cost_breakdown(days: int = SPEND_WINDOW_DAYS) -> dict[str, Any]:
                     if credits > float(priciest["credits"]):
                         priciest = {"credits": credits, "slot": slot, "ts": ts_raw}
 
-                    for bucket, name in ((by_model, model),
-                                         (by_channel, telemetry_channel_of(slot or None)),
-                                         (by_category, session_category(slot))):
+                    for bucket, name in (
+                        (by_model, model),
+                        (by_channel, telemetry_channel_of(slot or None)),
+                        (by_category, session_category(slot)),
+                    ):
                         e = bucket.setdefault(name, {"name": name, "credits": 0.0, "turns": 0})
                         e["credits"] = float(e["credits"]) + credits
                         e["turns"] = int(e["turns"]) + 1
@@ -718,8 +822,15 @@ def cost_breakdown(days: int = SPEND_WINDOW_DAYS) -> dict[str, Any]:
                     if slot:
                         c = convos.setdefault(
                             slot,
-                            {"slot": slot, "credits": 0.0, "turns": 0, "peak_pct": 0.0,
-                             "first_ts": ts_epoch, "last_ts": ts_epoch, "_occ": []},
+                            {
+                                "slot": slot,
+                                "credits": 0.0,
+                                "turns": 0,
+                                "peak_pct": 0.0,
+                                "first_ts": ts_epoch,
+                                "last_ts": ts_epoch,
+                                "_occ": [],
+                            },
                         )
                         c["credits"] = float(c["credits"]) + credits
                         c["turns"] = int(c["turns"]) + 1
@@ -745,8 +856,9 @@ def cost_breakdown(days: int = SPEND_WINDOW_DAYS) -> dict[str, Any]:
 
     total = float(cur_tot["credits"])
 
-    def _rank(bucket: dict[str, dict[str, Any]], deltas: dict[str, float] | None
-              ) -> list[dict[str, Any]]:
+    def _rank(
+        bucket: dict[str, dict[str, Any]], deltas: dict[str, float] | None
+    ) -> list[dict[str, Any]]:
         out = []
         for e in sorted(bucket.values(), key=lambda x: -float(x["credits"])):
             row = {
@@ -845,9 +957,7 @@ def cost_breakdown(days: int = SPEND_WINDOW_DAYS) -> dict[str, Any]:
             "prior_turns": int(prev_tot["turns"]),
             "prior_per_turn": _per_turn(prev_tot),
             "delta_pct": (
-                round((total - prev_credits) / prev_credits * 100, 0)
-                if prev_credits > 0
-                else None
+                round((total - prev_credits) / prev_credits * 100, 0) if prev_credits > 0 else None
             ),
             "priciest": {
                 "credits": round(float(priciest["credits"]), 1),
@@ -970,11 +1080,7 @@ def read_effective_model(source: object) -> str:
         for attr in ("_resolved_model_id", "_model"):
             for node in chain:
                 candidate = getattr(node, attr, "")
-                if (
-                    isinstance(candidate, str)
-                    and candidate
-                    and candidate.strip().lower() != "auto"
-                ):
+                if isinstance(candidate, str) and candidate and candidate.strip().lower() != "auto":
                     return candidate
     except Exception:
         pass
@@ -1066,8 +1172,17 @@ def _build_token_record(
     elapsed_ms: int = 0,
     ctx_blocks: dict[str, int] | None = None,
     phase: str = "",
+    app: str = "",
 ) -> dict[str, Any]:
     """Build the JSONL token-usage record dict (no I/O).
+
+    ``app`` stamps the OWNING app on the row when the turn ran on an app-owned
+    slot. Ownership recorded at write time is what survives the slot: a live
+    ``_app`` check at read time both leaks on slot-name reuse (a recreated slot
+    would vouch for the previous owner's rows) and denies an app its own
+    completed sessions. Empty for dashboard/user slots, and absent from rows
+    written before the field existed — an app caller sees neither, which is
+    the deny-by-default answer for ownership that was never recorded.
 
     ``surface`` tags the dispatch origin (``dashboard``, ``cron``, ``subagent``,
     …) and ``agent`` the agent id resolved for the turn. ``context_used`` /
@@ -1108,6 +1223,7 @@ def _build_token_record(
         "_type": "tokens",
         "ts": now.isoformat(),
         "slot": slot_key,
+        "app": app,
         "provider": provider or "",
         "model": model or "",
         "input": getattr(u, "input_tokens", 0),
@@ -1153,8 +1269,7 @@ def _finite_only(record: dict[str, Any]) -> dict[str, Any]:
     is exactly what a bad one looks like, so the check cannot be a type check.
     """
     return {
-        k: (0.0 if isinstance(v, float) and not math.isfinite(v) else v)
-        for k, v in record.items()
+        k: (0.0 if isinstance(v, float) and not math.isfinite(v) else v) for k, v in record.items()
     }
 
 
@@ -1187,8 +1302,7 @@ def _write_token_record(record: dict[str, Any], now: datetime) -> None:
         if not non_finite:
             raise
         logger.warning(
-            "token usage: replaced non-finite value(s) with 0.0 before persisting; "
-            "fields=%s",
+            "usage row: replaced non-finite value(s) with 0.0 before persisting; " "fields=%s",
             ",".join(non_finite),
         )
         line = json.dumps(_finite_only(record), allow_nan=False)
@@ -1209,6 +1323,7 @@ def persist_token_record(
     elapsed_ms: int = 0,
     ctx_blocks: dict[str, int] | None = None,
     phase: str = "",
+    app: str = "",
     model_source: object = None,
 ) -> None:
     """Append a token usage record to today's shard under
@@ -1249,6 +1364,7 @@ def persist_token_record(
                 elapsed_ms=elapsed_ms,
                 ctx_blocks=ctx_blocks,
                 phase=phase,
+                app=app,
             ),
             now,
         )
@@ -1269,6 +1385,7 @@ async def persist_token_record_async(
     elapsed_ms: int = 0,
     ctx_blocks: dict[str, int] | None = None,
     phase: str = "",
+    app: str = "",
     model_source: object = None,
 ) -> None:
     """Async variant: builds the record on-loop, offloads the file write.
@@ -1297,6 +1414,7 @@ async def persist_token_record_async(
             elapsed_ms=elapsed_ms,
             ctx_blocks=ctx_blocks,
             phase=phase,
+            app=app,
         )
         await asyncio.to_thread(_write_token_record, record, now)
     except Exception:

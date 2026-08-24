@@ -624,6 +624,45 @@ serves it as `GET /api/telemetry/context-trace?slot=<session key>` (`400` when
 `slot` is missing or blank), independent of the `telemetry.enabled` switch since
 these rows are always written.
 
+**Per-turn usage rows for one session.** `usage.slot_turn_usage(slot, days)` is
+the per-turn drill-down under `slot_spend`'s aggregate: one row per turn with
+`ts`, `model`, and the numeric fields named by `usage.TURN_USAGE_FIELDS`
+(tokens in/out, cache create/read, `credits`, `cost`, `duration_ms`, and the
+context meter pair). A non-numeric or non-finite field is dropped from its row,
+never the row itself. `handlers/telemetry.py::api_usage_turns` serves it as
+`GET /api/usage/turns?slot=<session key>[&days=N]` (`400` on a missing slot;
+`days` clamps to `[1, SPEND_WINDOW_DAYS]` rather than refusing, because shards
+beyond the window are retired anyway). This is the endpoint an **app** is
+granted through its manifest's `permissions.api` to account for what its own
+agent slots cost — apps otherwise have no path to credits, and the shard files'
+location and row shape stay this module's private contract. **App isolation is
+ROW-level** (App Kit §5.2, deny-by-default): each row is stamped with the
+owning app at write time (`_build_token_record`'s `app` field, threaded from
+the turn's slot), and an app caller receives only rows stamped with its own
+app — however the slot is named, and whether or not it is still live. A
+live-slot ownership check was deliberately rejected: it leaks on slot-name
+reuse (a recreated slot vouches for the previous owner's retained rows) and
+denies an app its own completed sessions, which are exactly what an audit
+reads. A foreign slot key answers `200` with no rows — indistinguishable from
+a slot that never ran — and rows predating the stamp are invisible to app
+callers. A **disabled app is refused outright** (`is_app_enabled`,
+deny-by-default, the same gate the opt-in builtin routes wrap every handler
+in): disable revokes read access, not only future writes. Every app-caller
+decision is SEL-logged — including a malformed request's refusal — and SEL
+plus the enablement probe run off-loop. The window is enforced **per row**,
+not only per shard file (the oldest shard in a window covers a whole day);
+a row whose timestamp cannot be parsed is excluded — accounting excludes
+what it cannot date. Dashboard users (empty request app) read any slot.
+**Stamping boundary:** rows are stamped at the two write sites that can run
+app-owned work — the dashboard chat runner (the slot's `_app`) and the
+subagent completion path (`info.app`, an app-dispatched subagent's spend).
+The task-runner, workflow, Slack and background-one-liner writers do not
+stamp because those surfaces are not app-owned — an empty stamp there is the
+correct value, not a gap. Webhook-session rows are currently unstamped and
+therefore invisible to app callers; if webhook sessions gain app ownership,
+that write site must stamp too. Same independence from the
+`telemetry.enabled` switch as the context trace.
+
 **Where it renders.** The breakdown is a **per-session side-panel tab**
 (`ViewKind` `context`, opened from the panel's `+` menu directly under Logs), not
 a section of the global Telemetry page. It is a **developer surface**: the `+`

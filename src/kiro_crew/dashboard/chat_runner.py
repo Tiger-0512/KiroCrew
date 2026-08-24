@@ -7637,6 +7637,10 @@ async def _run_chat(
                         agent=read_effective_agent(client) or slot.agent or "",
                         context_used=_ctx_used,
                         context_window=_ctx_window,
+                        # Ownership is recorded at write time (see
+                        # _build_token_record): the row must outlive the slot
+                        # without becoming readable by whoever recreates its name.
+                        app=getattr(slot, "_app", "") or "",
                         ctx_blocks=slot_ctx_blocks,
                         phase=slot_ctx_phase,
                         # Same wall clock the turn-duration histogram below is
