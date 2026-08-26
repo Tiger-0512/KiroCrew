@@ -5790,6 +5790,24 @@ async def _run_chat(
         except SessionClosingError:
             logger.info("Aborting dispatch for %s — gateway is shutting down", session_key)
             return
+        # Stop-before-dispatch gate: a Stop pressed during the async prep above
+        # (session cold start, context build) finds no session to cancel —
+        # SessionManager.stop_turn answers "idle" and the stop card resolves —
+        # so nothing downstream would ever honor it and the turn would open and
+        # stream to completion behind a card that says stopped (#5464). The
+        # point-in-time _stop_state is useless here (the idle resolution has
+        # already snapped it back), so compare _stop_generation, which counts
+        # stop INITIATIONS and never rewinds, against the turn-entry snapshot —
+        # the same durable signal the stop-hook suppression uses. Synchronous,
+        # beside the begin_turn gate, so no await separates the read from the
+        # stream's turn registration.
+        if getattr(slot, "_stop_generation", 0) != _stop_gen_turn_start:
+            logger.info(
+                "Aborting dispatch for %s — Stop was pressed while the turn "
+                "was still being prepared (no session existed to cancel yet)",
+                session_key,
+            )
+            return
         async for event in event_stream:
             # Heartbeat every 5s during long operations
             if time.time() - last_heartbeat > 5:

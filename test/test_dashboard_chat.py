@@ -13407,6 +13407,115 @@ class TestStopHistoryBanner:
 # ── Tests: AcpProcessDied handler in _run_chat ──
 
 
+class TestStopDuringSessionPrep:
+    """A Stop pressed while the turn is still being prepared must not open it.
+
+    During ``get_or_create``'s cold start the session is not registered yet,
+    so ``SessionManager.stop_turn`` answers ``"idle"`` and the stop resolves
+    without cancelling anything. The dispatch gate in ``_run_chat`` is what
+    honors that stop: it compares ``slot._stop_generation`` against the
+    turn-entry snapshot and refuses to open the turn (#5464 — [Stopped] card
+    shown while the response streams to completion).
+    """
+
+    def _make_state_and_slot(self, tmp_path):
+        from kiro_crew.dashboard.chat_runner import _run_chat
+
+        state = _make_state(tmp_path)
+        state.sessions.release = MagicMock()
+        state.sessions.reset = AsyncMock()
+        state.sessions.set_approval_policy = MagicMock()
+        state.sessions.check_context_usage = MagicMock()
+        state.sessions.get_slack_link = MagicMock(return_value=(None, None))
+        state.broadcast_ws = MagicMock()
+        state.push_slots_update = MagicMock()
+        state.is_yolo_active = MagicMock(return_value=False)
+        state._background_tasks = set()
+
+        slot = state.get_or_create_slot("stop-prep-slot")
+        slot.append("user", "hello", "msg msg-u")
+        return state, slot, _run_chat
+
+    def _make_client(self, stream_calls):
+        from kiro_crew.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMEvent
+
+        client = MagicMock()
+        client.shutdown = AsyncMock()
+
+        async def _stream(msg):
+            stream_calls.append(msg)
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="full response")
+            yield LLMEvent(kind=EVENT_COMPLETE, stop_reason="end_turn")
+
+        client.stream = _stream
+        client.stream_command = _stream
+        return client
+
+    @pytest.mark.asyncio
+    async def test_stop_during_get_or_create_aborts_dispatch(self, tmp_path: Path) -> None:
+        """Stop lands mid-cold-start → the turn never opens, nothing streams.
+
+        The stop is simulated exactly as the /stop handler leaves it for this
+        race: ``_stop_state`` flips idle → soft_pending (bumping
+        ``_stop_generation``) and, because ``stop_turn`` found no session and
+        answered "idle", snaps straight back to idle. A point-in-time state
+        check at dispatch sees nothing — only the generation delta survives.
+        """
+        state, slot, _run_chat = self._make_state_and_slot(tmp_path)
+        stream_calls: list[str] = []
+        client = self._make_client(stream_calls)
+
+        async def _slow_create(*args, **kwargs):
+            # Stop pressed while the session is still being created.
+            slot._stop_state = "soft_pending"
+            slot._stop_state = "idle"
+            return client, True, False
+
+        state.sessions.get_or_create = AsyncMock(side_effect=_slow_create)
+
+        await _run_chat(state, slot, "hello")
+
+        assert stream_calls == [], (
+            "the turn was dispatched despite a Stop during session prep — "
+            "the full response would stream behind a [Stopped] card (#5464)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_stop_dispatches_normally(self, tmp_path: Path) -> None:
+        """Control: without a Stop, the same setup opens the turn exactly once."""
+        state, slot, _run_chat = self._make_state_and_slot(tmp_path)
+        stream_calls: list[str] = []
+        client = self._make_client(stream_calls)
+        state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+
+        await _run_chat(state, slot, "hello")
+
+        assert len(stream_calls) == 1, "the dispatch gate must not fire without a Stop"
+
+    @pytest.mark.asyncio
+    async def test_stop_of_a_previous_turn_does_not_abort_the_next(self, tmp_path: Path) -> None:
+        """A stop generation inherited from an EARLIER turn must not trip the gate.
+
+        The gate compares against the snapshot taken at THIS turn's entry, so a
+        slot whose previous turn was stopped (generation already > 0) still
+        dispatches its next turn normally.
+        """
+        state, slot, _run_chat = self._make_state_and_slot(tmp_path)
+        # A previous turn was stopped and resolved before this turn began.
+        slot._stop_state = "soft_pending"
+        slot._stop_state = "idle"
+
+        stream_calls: list[str] = []
+        client = self._make_client(stream_calls)
+        state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+
+        await _run_chat(state, slot, "hello")
+
+        assert (
+            len(stream_calls) == 1
+        ), "a stale stop generation from a previous turn aborted a fresh turn"
+
+
 class TestAcpProcessDiedRecovery:
     """Verify _run_chat handles AcpProcessDied with retry logic, redaction, and session reset."""
 
