@@ -92,7 +92,7 @@ from kiro_crew.acp.types import (
     JsonRpcRequest,
 )
 from kiro_crew.agent import ensure_agent_materialized
-from kiro_crew.browser_cli.launch import browser_session_env
+from kiro_crew.browser_cli.launch import browser_session_env, browser_socket_env
 from kiro_crew.config.paths import kiro_agents_dir
 from kiro_crew.constants import KIROCREW_SPAWNED_ENV, KIROCREW_SPAWNED_VALUE
 from kiro_crew.env import augmented_path, resolve_krb5_ccname
@@ -1054,7 +1054,15 @@ class AcpRuntime:
         # one run-scoped process. What this buys is isolation BETWEEN families,
         # which is where the reported corruption came from. The docs tell an
         # agent sharing a process with a concurrent browser user to pass -s=.
-        env.update(browser_session_env(env))
+        browser_env = browser_session_env(env)
+        env.update(browser_env)
+        if browser_env:
+            lifecycle_env = {**os.environ, **browser_env}
+            env.update(
+                await self._to_thread_guarding_sandbox(
+                    browser_socket_env, lifecycle_env
+                )
+            )
         # Per-process scratch containment (#5063): the agent's temp AND its
         # prompt-guided work products land in an owned directory instead of
         # the shared system temp dir. Allocated off-loop (mkdir + config read)

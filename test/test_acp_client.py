@@ -670,8 +670,24 @@ class TestAcpClientSessionKey:
         the same session key (a pooled process is spawned before it is claimed).
         """
         names = []
+        caller_sockets = str(tmp_path / "caller-controlled-sockets")
+        caller_daemons = str(tmp_path / "caller-controlled-daemons")
+
+        def _lifecycle_env(resolved_env):
+            assert resolved_env.get("PWTEST_SOCKETS_DIR") != caller_sockets
+            assert resolved_env.get("PWTEST_DAEMON_SESSION_DIR") != caller_daemons
+            assert resolved_env["PLAYWRIGHT_CLI_SESSION"].startswith("kc-")
+            return {}
+
         for _ in range(2):
-            client = AcpClient(work_dir=tmp_path, session_key="same-key")
+            client = AcpClient(
+                work_dir=tmp_path,
+                session_key="same-key",
+                extra_env={
+                    "PWTEST_SOCKETS_DIR": caller_sockets,
+                    "PWTEST_DAEMON_SESSION_DIR": caller_daemons,
+                },
+            )
             with (
                 patch("kiro_crew.acp.client._resolve_kiro_bin", return_value="/usr/bin/kiro-cli"),
                 patch(
@@ -679,6 +695,7 @@ class TestAcpClientSessionKey:
                     return_value=(["/usr/bin/kiro-cli", "acp"], None),
                 ),
                 patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+                patch("kiro_crew.acp.client.browser_socket_env", side_effect=_lifecycle_env),
                 patch("kiro_crew.session._track_pid"),
                 patch("kiro_crew.session._track_session_pid"),
             ):
@@ -703,6 +720,8 @@ class TestAcpClientSessionKey:
     async def test_spawn_keeps_an_operator_set_browser_session(self, tmp_path, monkeypatch):
         """An operator who named a session means that one browser."""
         monkeypatch.setenv("PLAYWRIGHT_CLI_SESSION", "chrome")
+        monkeypatch.delenv("PWTEST_SOCKETS_DIR", raising=False)
+        monkeypatch.delenv("PWTEST_DAEMON_SESSION_DIR", raising=False)
         client = AcpClient(work_dir=tmp_path, session_key="k")
         with (
             patch("kiro_crew.acp.client._resolve_kiro_bin", return_value="/usr/bin/kiro-cli"),
@@ -724,6 +743,8 @@ class TestAcpClientSessionKey:
             env = call_kwargs.kwargs.get("env") or call_kwargs[1].get("env")
             assert env is not None
             assert env["PLAYWRIGHT_CLI_SESSION"] == "chrome"
+            assert "PWTEST_SOCKETS_DIR" not in env
+            assert "PWTEST_DAEMON_SESSION_DIR" not in env
 
         await _stop_stderr_drain(client)
 

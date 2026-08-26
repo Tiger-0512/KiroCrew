@@ -109,7 +109,7 @@ from kiro_crew.acp.types import (
     TurnUsage,
 )
 from kiro_crew.agent import ensure_agent_materialized
-from kiro_crew.browser_cli.launch import browser_session_env
+from kiro_crew.browser_cli.launch import browser_session_env, browser_socket_env
 from kiro_crew.config.paths import kiro_sessions_dir
 from kiro_crew.constants import (
     COMPACT_WAIT_TIMEOUT_SECS,
@@ -2798,7 +2798,11 @@ class AcpClient:
         # Own browser session per agent process: the CLI resolves a nameless
         # command to one shared ``default`` browser, so without this two agents
         # navigate and close each other's pages (see browser_session_env).
-        env.update(browser_session_env(env))
+        browser_env = browser_session_env(env)
+        env.update(browser_env)
+        if browser_env:
+            lifecycle_env = {**os.environ, **browser_env}
+            env.update(await self._to_thread_guarding_sandbox(browser_socket_env, lifecycle_env))
         # Per-process scratch containment (#5063) -- see acp/runtime.py's
         # twin block. Allocated off-loop, fail-open; owner recorded after
         # spawn; reclamation is liveness-keyed, never age-keyed.
