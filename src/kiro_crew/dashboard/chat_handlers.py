@@ -39,7 +39,10 @@ from kiro_crew.dashboard.chat_delivery import (
     queue_for_next_turn,
     steer_into_running_turn,
 )
-from kiro_crew.dashboard.chat_folders import _unhide_folder
+from kiro_crew.dashboard.chat_folders import (
+    _resolve_folder_project_dir,
+    _unhide_folder,
+)
 from kiro_crew.dashboard.chat_orchestrator import _stage_loop
 from kiro_crew.dashboard.chat_persistence import (
     _FLUSH_SNAPSHOT_RETRIES,
@@ -1889,6 +1892,23 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": "folder not found", "code": "folder_not_found"}, status=400
         )
+    folder_project = ""
+    existing_slot = state._slots.get(_normalize_slot_key(str(name))) if name else None
+    if folder_id and (existing_slot is None or not existing_slot.project):
+        folder_snapshot = await state.read_folders(
+            lambda folders: [dict(folder) for folder in folders]
+        )
+        folder_project, folder_project_error = await asyncio.to_thread(
+            _resolve_folder_project_dir, folder_snapshot, folder_id
+        )
+        if folder_project_error:
+            return web.json_response(
+                {
+                    "error": f"invalid folder project: {folder_project_error}",
+                    "code": "folder_project_invalid",
+                },
+                status=400,
+            )
 
     # Resolve workspace from agent bindings
     workspace = "default"
@@ -2031,20 +2051,9 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
         artifact_slug = body.get("artifact") if isinstance(body, dict) else None
         if isinstance(artifact_slug, str) and ARTIFACT_SLUG_RE.match(artifact_slug):
             slot._artifact = artifact_slug
-        # Default project to workspace directory so file search works out of the box
-        if not slot.project:
-            cfg_proj = cfg.dashboard.default_project if cfg else ""
-            if isinstance(cfg_proj, str) and cfg_proj:
-                resolved = os.path.realpath(os.path.expanduser(cfg_proj))
-                if os.path.isdir(resolved) and not is_sensitive_path(resolved):
-                    cfg_proj = resolved
-                else:
-                    cfg_proj = ""
-            else:
-                cfg_proj = ""
-            slot.project = cfg_proj or default_project_dir(workspace)
         # File the slot before the coalesced broadcast, so its first appearance
         # in every client is already inside the folder.
+        folder_applied = False
         if folder_id:
             # Mirror PATCH /api/chat/slots/{slot}/folder: a CHANGED folder must
             # re-inject the [FOLDER] breadcrumb on the next turn. `is_new` alone
@@ -2067,6 +2076,27 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
             if not await _unhide_folder(state, folder_id):
                 slot.folder_id = previous_folder
                 slot._folder_changed = previous_changed
+            else:
+                folder_applied = True
+        # A slot with no project filed into a project-linked folder inherits
+        # from the nearest configured ancestor before its first broadcast. The
+        # server owns this fallback because the client folder cache can be
+        # temporarily stale; existing named slots with an explicit project keep
+        # it and continue to use the project endpoint for scope changes.
+        if folder_project and folder_applied and not slot.project:
+            slot.project = folder_project
+        # Default project to workspace directory so file search works out of the box
+        if not slot.project:
+            cfg_proj = cfg.dashboard.default_project if cfg else ""
+            if isinstance(cfg_proj, str) and cfg_proj:
+                resolved = os.path.realpath(os.path.expanduser(cfg_proj))
+                if os.path.isdir(resolved) and not is_sensitive_path(resolved):
+                    cfg_proj = resolved
+                else:
+                    cfg_proj = ""
+            else:
+                cfg_proj = ""
+            slot.project = cfg_proj or default_project_dir(workspace)
         _sync_dashboard_slots(state)
         # Guarantee a frame. get_or_create_slot pushes for a NEW slot, but
         # returns an existing named slot without pushing — and this handler is
